@@ -4,8 +4,8 @@ import { mockNewsProvider } from '@/features/market-news/lib/providers/mockNewsP
 import { getMarketDataProvider, getMockMarketDataProvider } from '@/features/market-data/lib/providers/getMarketDataProvider';
 import type { NewsArticle, NewsProvider } from '@/features/market-news/lib/providers/types';
 import type { MarketDataProviderType } from '@/features/market-data/lib/providers/types';
-import { detectThemes } from '@/features/market-news/lib/themeDetection';
-import { discoverCandidates, type StockCandidate } from '@/features/market-news/lib/candidateDiscovery';
+import { detectThemesWithTraces } from '@/features/market-news/lib/themeDetection';
+import { discoverCandidates, isForeignInfluenced, type StockCandidate } from '@/features/market-news/lib/candidateDiscovery';
 import { apiCache } from '@/lib/apiCache';
 
 const QUERIES = ['국내 증시', '반도체', '2차전지', '바이오', 'AI 데이터센터', '자동차'];
@@ -28,6 +28,14 @@ async function fetchAllNews(provider: NewsProvider, label: string): Promise<News
   return merged;
 }
 
+export interface CandidatesDiagnostics {
+  totalNewsCount: number;
+  domesticNewsCount: number;
+  foreignNewsCount: number;
+  detectedThemes: Array<{ id: string; name: string; newsCount: number; strengthScore: number }>;
+  topThemeSourceHeadlines: Array<{ headline: string; source: string }>;
+}
+
 export interface CandidatesResponse {
   candidates: StockCandidate[];
   newsProviderType: 'naver' | 'mock';
@@ -35,6 +43,7 @@ export interface CandidatesResponse {
   fetchedAt: string; // ISO 8601, server time
   newsFallbackReason: string | null;
   marketFallbackReason: string | null;
+  diagnostics: CandidatesDiagnostics;
   cacheHit?: boolean;
   cacheAgeMs?: number | null;
 }
@@ -98,9 +107,26 @@ async function fetchFresh(): Promise<Omit<CandidatesResponse, 'cacheHit' | 'cach
   }
 
   // ── Discovery ─────────────────────────────────────────────────────────────────
-  const themes = detectThemes(articles);
-  const candidates = discoverCandidates(themes, stocks);
+  const { themes, traceMap } = detectThemesWithTraces(articles);
+  const candidates = discoverCandidates(themes, stocks, traceMap);
   console.log(`[candidates] discovered ${candidates.length} candidates from ${themes.length} themes`);
+
+  // ── Diagnostics ───────────────────────────────────────────────────────────────
+  const foreignCount = articles.filter((a) => isForeignInfluenced(a.title, a.description)).length;
+  const topTheme = themes[0];
+  const topTraceArticles = topTheme ? (traceMap.get(topTheme.id) ?? []) : [];
+  const topThemeSourceHeadlines = [...topTraceArticles]
+    .sort((a, b) => new Date(b.publishedAt).getTime() - new Date(a.publishedAt).getTime())
+    .slice(0, 3)
+    .map((a) => ({ headline: a.title, source: a.source }));
+
+  const diagnostics: CandidatesDiagnostics = {
+    totalNewsCount: articles.length,
+    domesticNewsCount: articles.length - foreignCount,
+    foreignNewsCount: foreignCount,
+    detectedThemes: themes.map((t) => ({ id: t.id, name: t.name, newsCount: t.newsCount, strengthScore: t.strengthScore })),
+    topThemeSourceHeadlines,
+  };
 
   return {
     candidates,
@@ -109,6 +135,7 @@ async function fetchFresh(): Promise<Omit<CandidatesResponse, 'cacheHit' | 'cach
     fetchedAt: new Date().toISOString(),
     newsFallbackReason,
     marketFallbackReason,
+    diagnostics,
   };
 }
 

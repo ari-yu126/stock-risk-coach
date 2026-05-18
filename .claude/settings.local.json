@@ -1,7 +1,16 @@
 {
   "permissions": {
     "allow": [
-      "Bash(npm run *)"
+      "Bash(npm run *)",
+      "Bash(curl *)",
+      "Bash(lsof -iTCP -sTCP:LISTEN -nP)",
+      "Bash(python3 -m json.tool)",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\('providerType:', d.get\\('providerType'\\)\\); print\\('fallbackReason:', d.get\\('fallbackReason'\\)\\); print\\('stock count:', len\\(d.get\\('stocks',[]\\)\\)\\);  print\\('first stock:', json.dumps\\(d['stocks'][0] if d.get\\('stocks'\\) else {}, ensure_ascii=False, indent=2\\)\\)\")",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\(json.dumps\\(d, ensure_ascii=False, indent=2\\)\\)\")",
+      "Bash(python3 -c ' *)",
+      "Bash(lsof -iTCP:3001 -nP)",
+      "Bash(npx tsc *)",
+      "Bash(npx next *)"
     ]
   }
 }

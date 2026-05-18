@@ -80,7 +80,7 @@ export function AddStockModal({ open, onClose, watchedTickers, onAdd }: AddStock
               type="text"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              placeholder="종목명 또는 티커 입력 (예: 삼성전자, 005930)"
+              placeholder="종목명 또는 티커 입력 (예: 삼성전자, KODEX 200)"
               autoComplete="off"
               className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 pr-9 text-sm text-gray-900 placeholder:text-gray-400 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20"
             />
@@ -129,26 +129,44 @@ export function AddStockModal({ open, onClose, watchedTickers, onAdd }: AddStock
 
             {searchState === 'done' && results.length > 0 && (
               <ul>
-                {results.map((r) => (
-                  <li key={r.ticker}>
-                    <button
-                      onClick={() => handleSelect(r.ticker)}
-                      className="flex w-full items-center justify-between border-b border-gray-100 px-3 py-2.5 text-left transition-colors last:border-0 hover:bg-gray-50"
-                    >
-                      <div>
-                        <p className="text-sm font-medium text-gray-900">{r.name}</p>
-                        <p className="text-xs text-gray-400">{r.ticker}</p>
-                      </div>
-                      <span className={`shrink-0 rounded-full px-2 py-0.5 text-xs font-medium ${
-                        r.marketType === 'KOSDAQ'
-                          ? 'bg-purple-50 text-purple-600'
-                          : 'bg-blue-50 text-blue-600'
-                      }`}>
-                        {r.marketType}
-                      </span>
-                    </button>
-                  </li>
-                ))}
+                {results.map((r) => {
+                  const isIndex = r.type === 'index';
+                  const typeBadge =
+                    r.type === 'etf'   ? { label: 'ETF',  cls: 'bg-emerald-50 text-emerald-700' } :
+                    r.type === 'index' ? { label: '지수',  cls: 'bg-gray-100 text-gray-500' } :
+                                         { label: '종목',  cls: 'bg-blue-50 text-blue-600' };
+                  const mktBadge =
+                    r.marketType === 'KOSDAQ' ? 'bg-purple-50 text-purple-600' :
+                    r.marketType === '기타'   ? 'bg-gray-50 text-gray-400' :
+                                                'bg-blue-50 text-blue-500';
+                  return (
+                    <li key={r.ticker}>
+                      <button
+                        onClick={() => !isIndex && handleSelect(r.ticker)}
+                        disabled={isIndex}
+                        title={isIndex ? '지수는 워치리스트에 추가할 수 없어요.' : undefined}
+                        className={`flex w-full items-center justify-between border-b border-gray-100 px-3 py-2.5 text-left transition-colors last:border-0 ${
+                          isIndex ? 'cursor-not-allowed opacity-50' : 'hover:bg-gray-50'
+                        }`}
+                      >
+                        <div className="min-w-0 flex-1">
+                          <p className="text-sm font-medium text-gray-900">{r.name}</p>
+                          <p className="text-xs text-gray-400">{r.ticker}</p>
+                        </div>
+                        <div className="ml-2 flex shrink-0 gap-1">
+                          <span className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${typeBadge.cls}`}>
+                            {typeBadge.label}
+                          </span>
+                          {r.marketType !== '기타' && (
+                            <span className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${mktBadge}`}>
+                              {r.marketType}
+                            </span>
+                          )}
+                        </div>
+                      </button>
+                    </li>
+                  );
+                })}
               </ul>
             )}
           </div>

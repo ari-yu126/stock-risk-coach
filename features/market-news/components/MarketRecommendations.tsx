@@ -3,12 +3,65 @@
 import { useState, useEffect, useMemo } from 'react';
 import { MOCK_BRIEFING } from '../lib/mock-news';
 import { RiskBadge } from '../../watchlist/components/RiskBadge';
+import { Sparkline } from '../../watchlist/components/Sparkline';
+import { getIntradaySeries } from '../../watchlist/lib/intradayData';
 import type { AttentionLevel, RiskLevel } from '../../watchlist/types';
 import type { MarketBriefing, MarketSentiment, RecommendationAction } from '../types';
 import type { CandidatesResponse } from '@/app/api/candidates/route';
 import type { StockCandidate, CandidateScoreBreakdown, JudgmentLabel } from '../lib/candidateDiscovery';
+import { generateCandidateNarrative } from '../lib/candidateDiscovery';
 import type { MarketDataProviderType } from '@/features/market-data/lib/providers/types';
 import type { DetectedTheme } from '../lib/themeDetection';
+import { calcFreshness, calcAgeMinutes } from '../lib/themeDetection';
+import { analyzeMarketMood, type MarketMoodType } from '../lib/marketMood';
+import { getMarketSession, type SessionInfo } from '../lib/marketSession';
+import { getNotificationSettings, sendWatchlistNotification } from '../../watchlist/lib/notifications';
+import { loadTickers } from '../../watchlist/lib/storage';
+import { enrichWithFlowScores, type FlowEnrichmentContext } from '../lib/candidateDiscovery';
+import { analyzeSectorRotation, type SectorRotationResult } from '../lib/sectorRotation';
+import { analyzeMomentum, loadSnapshots } from '../../watchlist/lib/momentumHistory';
+import { detectFomo } from '../../watchlist/lib/fomoDetection';
+
+// ── Freshness display helpers ─────────────────────────────────────────────────
+
+function formatRelativeTime(iso: string): string {
+  const minutes = calcAgeMinutes(iso);
+  if (minutes < 1)    return '방금 전';
+  if (minutes < 60)   return `${Math.round(minutes)}분 전`;
+  if (minutes < 1440) return `${Math.round(minutes / 60)}시간 전`;
+  return `${Math.round(minutes / 1440)}일 전`;
+}
+
+function freshnessOpacity(iso: string): string {
+  const score = calcFreshness(iso);
+  if (score >= 0.75) return '';
+  if (score >= 0.5)  return 'opacity-75';
+  return 'opacity-50';
+}
+
+// ── Market mood style map ─────────────────────────────────────────────────────
+
+const MOOD_STYLE: Record<MarketMoodType, { bg: string; border: string; text: string; icon: string }> = {
+  'risk-on':              { bg: 'bg-emerald-50', border: 'border-emerald-200', text: 'text-emerald-700', icon: '🚀' },
+  'risk-off':             { bg: 'bg-blue-50',    border: 'border-blue-200',    text: 'text-blue-700',    icon: '🛡️' },
+  'mixed':                { bg: 'bg-gray-50',    border: 'border-gray-200',    text: 'text-gray-600',    icon: '⚖️' },
+  'momentum-speculative': { bg: 'bg-orange-50',  border: 'border-orange-200',  text: 'text-orange-700',  icon: '⚡' },
+};
+
+const MOOD_LABEL: Record<MarketMoodType, string> = {
+  'risk-on':              '위험선호',
+  'risk-off':             '위험회피',
+  'mixed':                '중립/혼조',
+  'momentum-speculative': '과열/투기',
+};
+
+// ── Session style ─────────────────────────────────────────────────────────────
+
+const SESSION_STYLE: Record<string, string> = {
+  premarket:     'bg-amber-50 border-amber-200 text-amber-700',
+  intraday:      'bg-blue-50 border-blue-200 text-blue-700',
+  'after-market': 'bg-indigo-50 border-indigo-200 text-indigo-700',
+};
 
 // ── Type aliases & constants ───────────────────────────────────────────────────
 
@@ -105,14 +158,16 @@ function deriveMood(candidates: StockCandidate[]): { label: string; cls: string 
 // ── Provider badges ────────────────────────────────────────────────────────────
 
 function ProviderBadges({
-  newsType, marketType, fetchedAt,
+  newsType, marketType, fetchedAt, showDisclaimer = false,
 }: {
   newsType: 'naver' | 'mock';
   marketType: MarketDataProviderType;
   fetchedAt: string | null;
+  showDisclaimer?: boolean;
 }) {
   return (
     <div className="flex flex-col items-end gap-1">
+      {/* All chips in a single flex row — keeps every pill on the same baseline */}
       <div className="flex flex-wrap items-center gap-2">
         {newsType === 'naver' ? (
           <span className="inline-flex items-center gap-1.5 rounded-full border border-green-200 bg-green-50 px-2.5 py-1 text-xs font-medium text-green-700">
@@ -130,6 +185,11 @@ function ProviderBadges({
         ) : (
           <span className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-gray-50 px-2.5 py-1 text-xs font-medium text-gray-500">
             <span className="h-1.5 w-1.5 rounded-full bg-gray-400" aria-hidden="true" />마켓 {MARKET_PROVIDER_LABEL[marketType]}
+          </span>
+        )}
+        {showDisclaimer && (
+          <span className="inline-flex items-center rounded-full border border-gray-200 bg-white px-2.5 py-1 text-xs text-gray-400">
+            참고용 · 매매 추천 아님
           </span>
         )}
       </div>
@@ -153,29 +213,48 @@ function SummaryBar({
   totalCount: number;
   mood: { label: string; cls: string };
 }) {
+  const separator = (
+    <span
+      className="inline-flex h-4 shrink-0 items-center self-center text-gray-300 leading-none"
+      aria-hidden="true"
+    >
+      |
+    </span>
+  );
+
   return (
     // top-16 = 64px, sits just under the site header (≈73px) — adjust if needed
-    <div className="sticky top-16 z-[9] -mx-4 mb-4 border-y border-gray-100 bg-white/95 px-4 py-2.5 shadow-sm backdrop-blur-sm">
-      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm">
+    <div className="mb-4 overflow-hidden border-y border-gray-100 bg-white/95 px-4 py-2.5 shadow-sm backdrop-blur-sm">
+      <div className="flex w-full min-w-0 flex-wrap items-center gap-x-3 gap-y-2 text-sm">
         {topTheme && (
-          <span className="flex items-center gap-1.5 font-medium text-gray-800">
-            <span className="text-base">🔥</span>
-            <span>{topTheme.name}</span>
-            <span className="rounded-full bg-blue-100 px-1.5 py-0.5 text-[11px] font-semibold text-blue-700">
+          <span className="flex min-w-0 w-full max-w-full items-center gap-1.5 overflow-hidden sm:w-auto sm:max-w-[min(100%,20rem)]">
+            <span
+              className="inline-flex shrink-0 items-center justify-center text-base leading-none"
+              aria-hidden="true"
+            >
+              🔥
+            </span>
+            <span className="min-w-0 flex-1 truncate font-medium leading-5 text-gray-800">
+              <span className="font-normal text-gray-500">감지 테마:</span>{' '}
+              {topTheme.name}
+            </span>
+            <span className="inline-flex h-5 shrink-0 items-center rounded-full bg-blue-100 px-2 text-[11px] font-semibold leading-none text-blue-700">
               강도 {topTheme.strengthScore}
             </span>
           </span>
         )}
-        <span className="text-gray-300" aria-hidden="true">|</span>
-        <span className="text-gray-600">
+        {topTheme && separator}
+        <span className="inline-flex shrink-0 items-center leading-5 text-gray-600">
           후보 <span className="font-semibold text-gray-900">{displayCount}</span>
           {displayCount !== totalCount && (
             <span className="text-gray-400"> / {totalCount}</span>
           )}
           종목
         </span>
-        <span className="text-gray-300" aria-hidden="true">|</span>
-        <span className={`font-medium ${mood.cls}`}>{mood.label}</span>
+        {separator}
+        <span className={`inline-flex shrink-0 items-center font-medium leading-5 ${mood.cls}`}>
+          {mood.label}
+        </span>
       </div>
     </div>
   );
@@ -267,6 +346,9 @@ function ScoreBar({ value, max, color }: { value: number; max: number; color: st
 }
 
 function ScoreDetail({ breakdown }: { breakdown: CandidateScoreBreakdown }) {
+  const hasFlowData =
+    breakdown.freshnessBonus !== 0 || breakdown.momentumBonus !== 0 ||
+    breakdown.overheatPenalty !== 0 || breakdown.sectorLeaderBonus !== 0;
   const rows: { label: string; value: number; max: number; color: string; detail: string }[] = [
     { label: '테마 강도',    value: breakdown.themeScore,  max: 40, color: 'bg-blue-400',    detail: '뉴스 빈도 × 0.4' },
     { label: '거래량',       value: breakdown.volumeScore, max: 25, color: 'bg-violet-400',   detail: `${breakdown.volumeRatio.toFixed(2)}× 평균` },
@@ -287,6 +369,28 @@ function ScoreDetail({ breakdown }: { breakdown: CandidateScoreBreakdown }) {
         <span>합계</span>
         <span className="tabular-nums">{breakdown.total} / 100</span>
       </div>
+      {hasFlowData && (
+        <div className="mt-3 border-t border-gray-200 pt-3">
+          <p className="mb-2 text-[10px] font-semibold uppercase tracking-wide text-gray-400">흐름 보정</p>
+          {[
+            { label: '뉴스 신선도', val: breakdown.freshnessBonus,    show: breakdown.freshnessBonus    !== 0 },
+            { label: '모멘텀',      val: breakdown.momentumBonus,     show: breakdown.momentumBonus     !== 0 },
+            { label: '섹터 주도',   val: breakdown.sectorLeaderBonus, show: breakdown.sectorLeaderBonus  > 0 },
+            { label: '과열 페널티', val: -breakdown.overheatPenalty,  show: breakdown.overheatPenalty    > 0 },
+          ].filter((r) => r.show).map((r) => (
+            <div key={r.label} className="flex items-center justify-between gap-2">
+              <span className="w-24 shrink-0 text-gray-500">{r.label}</span>
+              <span className={`ml-auto tabular-nums font-medium ${r.val > 0 ? 'text-emerald-600' : 'text-red-500'}`}>
+                {r.val > 0 ? '+' : ''}{r.val}pt
+              </span>
+            </div>
+          ))}
+          <div className="mt-2 flex items-center justify-between border-t border-gray-200 pt-2 font-bold text-gray-700">
+            <span>흐름 반영</span>
+            <span className="tabular-nums">{breakdown.flowTotal} / 100</span>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -356,11 +460,19 @@ function CompactCandidateRow({ candidate }: { candidate: StockCandidate }) {
 
 function CandidateCard({ candidate }: { candidate: StockCandidate }) {
   const [expanded, setExpanded] = useState(false);
-  const { stock, riskScore, matchedTheme, scoreBreakdown, matchConfidence, judgmentLabel, judgmentExplanation, discoveryReason, cautionReason } = candidate;
+  const [newsExpanded, setNewsExpanded] = useState(false);
+  const {
+    stock, riskScore, matchedTheme, scoreBreakdown, matchConfidence,
+    judgmentLabel, judgmentExplanation, discoveryReason, cautionReason,
+    matchedNewsHeadlines, matchedNewsSources, matchedNewsPublishedAt,
+    matchedNewsKeywords, isForeignNewsInfluenced,
+  } = candidate;
   const isLowConfidence = matchConfidence < 50;
   const isUp = stock.changePercent >= 0;
   const action = ACTION_STYLE[judgmentLabel];
   const attn = ATTENTION_STYLE[riskScore.attentionLevel];
+  const series = getIntradaySeries(stock.ticker, stock.changePercent);
+  const narrative = useMemo(() => generateCandidateNarrative(candidate), [candidate]);
 
   return (
     <div className="flex flex-col rounded-xl border border-gray-200 bg-white shadow-sm">
@@ -378,13 +490,18 @@ function CandidateCard({ candidate }: { candidate: StockCandidate }) {
             )}
           </p>
         </div>
-        <div className="flex flex-col items-end gap-0.5">
-          <p className="text-base font-bold text-gray-900">
-            {fmt(stock.price)}<span className="ml-0.5 text-xs font-normal text-gray-400">원</span>
-          </p>
-          <p className={`text-xs font-semibold ${isUp ? 'text-red-500' : 'text-blue-500'}`}>
-            {isUp ? '▲' : '▼'} {isUp ? '+' : ''}{stock.changePercent.toFixed(1)}%
-          </p>
+        <div className="flex flex-col items-end gap-1">
+          <div className="flex items-center gap-2">
+            <Sparkline points={series.points} trend={series.trend} width={72} height={26} />
+            <div className="text-right">
+              <p className="text-base font-bold text-gray-900">
+                {fmt(stock.price)}<span className="ml-0.5 text-xs font-normal text-gray-400">원</span>
+              </p>
+              <p className={`text-xs font-semibold ${isUp ? 'text-red-500' : 'text-blue-500'}`}>
+                {isUp ? '▲' : '▼'} {isUp ? '+' : ''}{stock.changePercent.toFixed(1)}%
+              </p>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -435,9 +552,15 @@ function CandidateCard({ candidate }: { candidate: StockCandidate }) {
         </button>
         {expanded && (
           <div id={`score-detail-${stock.ticker}`} className="mb-2 mt-2 space-y-3">
+            {/* Analyst narrative */}
+            <div className="rounded-lg border border-blue-100 bg-blue-50 p-3">
+              <p className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-blue-400">AI 분석</p>
+              <p className="text-xs leading-relaxed text-blue-800">{narrative}</p>
+            </div>
             <div className="space-y-1 rounded-lg border border-gray-100 bg-gray-50 p-3 text-xs">
               <div className="flex justify-between"><span className="text-gray-500">매칭 테마</span><span className="font-medium text-gray-700">{matchedTheme.name}</span></div>
               <div className="flex justify-between"><span className="text-gray-500">테마 강도</span><span className="font-medium text-gray-700">{matchedTheme.strengthScore} / 100</span></div>
+              <div className="flex justify-between"><span className="text-gray-500">뉴스 신선도</span><span className="font-medium text-gray-700">{Math.round(matchedTheme.freshnessScore * 100)}%</span></div>
               <div className="flex justify-between"><span className="text-gray-500">뉴스 감성</span><span className="font-medium text-gray-700">{SENTIMENT_KO[matchedTheme.sentimentSummary]}</span></div>
               <div className="flex justify-between"><span className="text-gray-500">관련 기사</span><span className="font-medium text-gray-700">{matchedTheme.newsCount}건</span></div>
               <div className="flex justify-between">
@@ -462,10 +585,108 @@ function CandidateCard({ candidate }: { candidate: StockCandidate }) {
         )}
       </div>
 
-      {/* 6. Caution footer */}
+      {/* 6. Collapsible news trace */}
+      {matchedNewsHeadlines.length > 0 && (
+        <div className="border-t border-gray-100 px-5 py-2">
+          <button
+            onClick={() => setNewsExpanded((v) => !v)}
+            aria-expanded={newsExpanded}
+            aria-controls={`news-trace-${stock.ticker}`}
+            className="flex w-full items-center justify-between py-1 text-xs font-medium text-gray-400 transition-colors hover:text-gray-600"
+          >
+            <span className="flex items-center gap-1.5">
+              반영된 뉴스
+              {isForeignNewsInfluenced && (
+                <span className="rounded border border-indigo-200 bg-indigo-50 px-1.5 py-0.5 text-[10px] font-semibold text-indigo-600">
+                  해외 영향
+                </span>
+              )}
+            </span>
+            <span aria-hidden="true" className="text-lg leading-none">{newsExpanded ? '−' : '+'}</span>
+          </button>
+          {newsExpanded && (
+            <div id={`news-trace-${stock.ticker}`} className="mb-2 mt-2 space-y-2.5">
+              {/* Matched keywords */}
+              {matchedNewsKeywords.length > 0 && (
+                <div className="flex flex-wrap gap-1">
+                  {matchedNewsKeywords.map((kw) => (
+                    <span key={kw} className="rounded bg-blue-50 px-1.5 py-0.5 text-[11px] font-medium text-blue-600">
+                      {kw}
+                    </span>
+                  ))}
+                </div>
+              )}
+              {/* Headline list with freshness */}
+              <div className="space-y-2 rounded-lg border border-gray-100 bg-gray-50 p-3 text-xs">
+                {matchedNewsHeadlines.map((headline, i) => {
+                  const publishedAt = matchedNewsPublishedAt[i];
+                  const fadeCls = publishedAt ? freshnessOpacity(publishedAt) : '';
+                  return (
+                    <div key={i} className={`flex items-start gap-1.5 ${fadeCls}`}>
+                      <div className="mt-0.5 flex shrink-0 flex-col gap-0.5">
+                        <span className="rounded bg-gray-200 px-1 py-0.5 text-[10px] font-medium text-gray-500">
+                          {matchedNewsSources[i]}
+                        </span>
+                        {publishedAt && (
+                          <span className="text-[10px] text-gray-400">
+                            {formatRelativeTime(publishedAt)}
+                          </span>
+                        )}
+                      </div>
+                      <p className="line-clamp-2 leading-snug text-gray-700">{headline}</p>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* 7. Caution footer */}
       <div className={`rounded-b-xl border-l-4 bg-gray-50 px-5 py-3 ${CAUTION_BORDER[riskScore.level]}`}>
         <p className="text-xs leading-relaxed text-gray-500">{cautionReason}</p>
       </div>
+    </div>
+  );
+}
+
+// ── Market mood card ──────────────────────────────────────────────────────────
+
+function MarketMoodCard({ candidates }: { candidates: StockCandidate[] }) {
+  const mood = useMemo(() => analyzeMarketMood(candidates), [candidates]);
+  const style = MOOD_STYLE[mood.mood];
+  return (
+    <div className={`flex items-start gap-3 rounded-xl border px-4 py-3.5 ${style.bg} ${style.border}`}>
+      <span
+        className="inline-flex shrink-0 items-center self-center text-xl leading-none"
+        aria-hidden="true"
+      >
+        {style.icon}
+      </span>
+      <div className="flex min-w-0 flex-1 flex-col gap-2">
+        <p className={`text-xs font-semibold uppercase tracking-wide leading-snug ${style.text}`}>
+          {MOOD_LABEL[mood.mood]}
+          <span className="ml-2 font-normal normal-case opacity-70">
+            확신도 {Math.round(mood.confidence * 100)}%
+          </span>
+        </p>
+        <p className={`text-sm leading-relaxed ${style.text}`}>{mood.summary}</p>
+      </div>
+    </div>
+  );
+}
+
+// ── Session banner ────────────────────────────────────────────────────────────
+
+function SessionBanner({ session }: { session: SessionInfo }) {
+  const cls = SESSION_STYLE[session.session] ?? SESSION_STYLE['mixed'];
+  return (
+    <div className={`flex items-center gap-2 rounded-lg border px-3 py-2 text-sm ${cls}`}>
+      <span aria-hidden="true">{session.icon}</span>
+      <span className="font-semibold">{session.label}</span>
+      <span className="text-gray-500">—</span>
+      <span>{session.focusMessage}</span>
     </div>
   );
 }
@@ -488,6 +709,134 @@ function SkeletonCard() {
   );
 }
 
+// ── Trading dashboard strip ───────────────────────────────────────────────────
+
+function StripTile({ icon, label, value, sub, colorClass }: {
+  icon: string; label: string; value: string; sub: string; colorClass: string;
+}) {
+  return (
+    <div className={`flex flex-col gap-0.5 rounded-xl border p-3 ${colorClass}`}>
+      <p className="flex items-center gap-1 text-[11px] font-semibold uppercase tracking-wide opacity-60">
+        <span aria-hidden="true">{icon}</span>{label}
+      </p>
+      <p className="truncate text-sm font-bold">{value}</p>
+      <p className="text-[11px] opacity-70">{sub}</p>
+    </div>
+  );
+}
+
+function TradingDashboardStrip({
+  candidates, sectorRotation,
+}: {
+  candidates: StockCandidate[];
+  sectorRotation: SectorRotationResult | null;
+}) {
+  if (candidates.length === 0) return null;
+  const strongestFlow = [...candidates].sort((a, b) => b.scoreBreakdown.flowTotal - a.scoreBreakdown.flowTotal)[0];
+  const topOverheat   = [...candidates]
+    .filter((c) => c.scoreBreakdown.overheatPenalty > 0)
+    .sort((a, b) => b.scoreBreakdown.overheatPenalty - a.scoreBreakdown.overheatPenalty)[0] ?? null;
+  const topVolume = [...candidates].sort((a, b) => b.scoreBreakdown.volumeRatio - a.scoreBreakdown.volumeRatio)[0];
+  return (
+    <div className="mb-4 grid grid-cols-2 gap-2 sm:grid-cols-4">
+      <StripTile
+        icon="🔥" label="가장 강한 흐름"
+        value={strongestFlow.stock.name}
+        sub={`종합 ${strongestFlow.scoreBreakdown.flowTotal}점`}
+        colorClass="border-orange-200 bg-orange-50 text-orange-800"
+      />
+      <StripTile
+        icon="⚠️" label="과열 주의"
+        value={topOverheat ? topOverheat.stock.name : '과열 없음'}
+        sub={topOverheat ? `페널티 ${topOverheat.scoreBreakdown.overheatPenalty}pt` : '현재 정상'}
+        colorClass={topOverheat ? 'border-red-200 bg-red-50 text-red-800' : 'border-gray-200 bg-gray-50 text-gray-500'}
+      />
+      <StripTile
+        icon="📈" label="거래량 급증 TOP"
+        value={topVolume.stock.name}
+        sub={`${topVolume.scoreBreakdown.volumeRatio.toFixed(1)}배 거래량`}
+        colorClass="border-blue-200 bg-blue-50 text-blue-800"
+      />
+      <StripTile
+        icon="🔄" label="순환매"
+        value={sectorRotation?.rotationSummary ?? '분석 중'}
+        sub={sectorRotation ? `${sectorRotation.allSectors.length}개 섹터` : '데이터 없음'}
+        colorClass="border-violet-200 bg-violet-50 text-violet-800"
+      />
+    </div>
+  );
+}
+
+// ── Debug panel ───────────────────────────────────────────────────────────────
+
+function DebugPanel({
+  candidates, flowCtx, sectorRotation, fetchedAt,
+}: {
+  candidates: StockCandidate[];
+  flowCtx: FlowEnrichmentContext;
+  sectorRotation: SectorRotationResult;
+  fetchedAt: string | null;
+}) {
+  return (
+    <div className="mt-6 rounded-xl border-2 border-dashed border-amber-300 bg-amber-50 p-4 text-xs">
+      <p className="mb-3 font-bold text-amber-700">🔍 진단 모드 (?debug=1)</p>
+
+      <div className="mb-3">
+        <p className="mb-1 font-semibold text-amber-600">메타</p>
+        <p className="text-gray-700">fetchedAt: {fetchedAt ?? '없음'} · 후보 {candidates.length}개</p>
+      </div>
+
+      <div className="mb-3 overflow-x-auto">
+        <p className="mb-1 font-semibold text-amber-600">점수 분해</p>
+        <table className="min-w-full border-collapse font-mono text-[10px]">
+          <thead>
+            <tr className="text-gray-500">
+              {['종목', '기본', '신선도', '모멘텀', '섹터', '과열', '흐름', '방향', 'FOMO'].map((h) => (
+                <th key={h} className="px-1.5 py-0.5 text-left">{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {candidates.map((c) => (
+              <tr key={c.stock.ticker} className="border-t border-amber-200 text-gray-700">
+                <td className="px-1.5 py-0.5">{c.stock.ticker}</td>
+                <td className="px-1.5 py-0.5 text-center">{c.scoreBreakdown.total}</td>
+                <td className="px-1.5 py-0.5 text-center">{c.scoreBreakdown.freshnessBonus >= 0 ? '+' : ''}{c.scoreBreakdown.freshnessBonus}</td>
+                <td className="px-1.5 py-0.5 text-center">{c.scoreBreakdown.momentumBonus >= 0 ? '+' : ''}{c.scoreBreakdown.momentumBonus}</td>
+                <td className="px-1.5 py-0.5 text-center">+{c.scoreBreakdown.sectorLeaderBonus}</td>
+                <td className="px-1.5 py-0.5 text-center">-{c.scoreBreakdown.overheatPenalty}</td>
+                <td className="px-1.5 py-0.5 text-center font-bold">{c.scoreBreakdown.flowTotal}</td>
+                <td className="px-1.5 py-0.5 text-center">{flowCtx.momentumDirections.get(c.stock.ticker) ?? '—'}</td>
+                <td className="px-1.5 py-0.5 text-center">{flowCtx.fomoScores.get(c.stock.ticker) ?? 0}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      <div>
+        <p className="mb-1 font-semibold text-amber-600">섹터 순환매 — {sectorRotation.rotationSummary}</p>
+        <div className="space-y-0.5">
+          {sectorRotation.allSectors.map((s) => (
+            <div key={s.sector} className="flex gap-3 font-mono text-[10px] text-gray-700">
+              <span className="w-14 shrink-0">{s.sector}</span>
+              <span>vol×{s.avgVolumeRatio.toFixed(1)}</span>
+              <span>{s.avgChangePercent >= 0 ? '+' : ''}{s.avgChangePercent.toFixed(1)}%</span>
+              <span>str:{s.avgStrengthScore.toFixed(0)}</span>
+              {sectorRotation.leadingSectors.some((ls) => ls.sector === s.sector) && (
+                <span className="font-semibold text-orange-600">▲주도</span>
+              )}
+              {sectorRotation.weakeningSectors.some((ws) => ws.sector === s.sector) && (
+                <span className="text-blue-500">▼약화</span>
+              )}
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Main export ────────────────────────────────────────────────────────────────
 
 export function MarketRecommendations() {
@@ -497,6 +846,7 @@ export function MarketRecommendations() {
   const [fetchedAt, setFetchedAt] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState(false);
+  const [session, setSession] = useState<SessionInfo | null>(null);
 
   // Controls
   const [sortBy, setSortBy] = useState<SortKey>('score');
@@ -506,17 +856,70 @@ export function MarketRecommendations() {
   const [filterJudgment, setFilterJudgment] = useState<JudgmentLabel | null>(null);
   const [compactMode, setCompactMode] = useState(false);
 
+  const [flowCtx, setFlowCtx] = useState<FlowEnrichmentContext | null>(null);
+  const [sectorRotation, setSectorRotation] = useState<SectorRotationResult | null>(null);
+  const [debugMode, setDebugMode] = useState(false);
+
+  // Hydration-safe session + debug detection (client-only, avoids SSR mismatch)
+  useEffect(() => {
+    setSession(getMarketSession()); // eslint-disable-line react-hooks/set-state-in-effect
+  }, []);
+
+  useEffect(() => {
+    setDebugMode(new URLSearchParams(window.location.search).get('debug') === '1'); // eslint-disable-line react-hooks/set-state-in-effect
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
     fetch('/api/candidates')
       .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json() as Promise<CandidatesResponse>; })
       .then((data) => {
         if (!cancelled) {
-          setCandidates(data.candidates);
+          // Flow enrichment: runs client-side using localStorage momentum snapshots
+          const rotation = analyzeSectorRotation(data.candidates);
+          const leadingSectorNames = new Set(rotation.leadingSectors.map((s) => s.sector));
+          const momentumDirections = new Map<string, 'accelerating' | 'fading' | 'sideways'>();
+          const fomoScoresMap = new Map<string, number>();
+          for (const c of data.candidates) {
+            const ticker = c.stock.ticker;
+            const momentum = analyzeMomentum(ticker);
+            momentumDirections.set(ticker, momentum.direction);
+            const snaps = loadSnapshots(ticker);
+            const fomo = detectFomo({
+              ticker,
+              volumeRatio: c.scoreBreakdown.volumeRatio,
+              changePercent: c.stock.changePercent,
+              newsCount: c.matchedTheme.newsCount,
+              snapshots: snaps,
+            });
+            fomoScoresMap.set(ticker, fomo.score);
+          }
+          const ctx: FlowEnrichmentContext = {
+            leadingSectorNames,
+            momentumDirections,
+            fomoScores: fomoScoresMap,
+          };
+          const enriched = enrichWithFlowScores(data.candidates, ctx);
+          setCandidates(enriched);
+          setFlowCtx(ctx);
+          setSectorRotation(rotation);
           setNewsProviderType(data.newsProviderType);
           setMarketProviderType(data.marketProviderType);
           setFetchedAt(data.fetchedAt);
           setLoaded(true);
+          // Fire notifications for watched stocks that are "오늘 관심 후보"
+          const settings = getNotificationSettings();
+          if (settings.enabled) {
+            const watchedTickers = loadTickers();
+            for (const c of enriched) {
+              if (
+                c.judgmentLabel === '오늘 관심 후보' &&
+                watchedTickers.includes(c.stock.ticker)
+              ) {
+                sendWatchlistNotification(c.stock.ticker, c.stock.name, c.judgmentLabel);
+              }
+            }
+          }
         }
       })
       .catch(() => { if (!cancelled) { setError(true); setLoaded(true); } });
@@ -552,6 +955,9 @@ export function MarketRecommendations() {
   return (
     <div className="space-y-6">
 
+      {/* Session banner — client-only, no hydration mismatch */}
+      {session && <SessionBanner session={session} />}
+
       {/* 오늘 시장 브리핑 */}
       <section>
         <h2 className="mb-3 text-lg font-semibold text-gray-900">오늘 시장 브리핑</h2>
@@ -566,14 +972,18 @@ export function MarketRecommendations() {
             <h2 className="text-lg font-semibold text-gray-900">오늘 주목 종목</h2>
             <p className="text-sm text-gray-500">뉴스 테마 · 거래량 · 가격 신호 기반 자동 선정</p>
           </div>
-          <div className="flex flex-wrap items-center gap-2">
-            {loaded && !error && (
-              <ProviderBadges newsType={newsProviderType} marketType={marketProviderType} fetchedAt={fetchedAt} />
-            )}
-            <span className="rounded-full border border-gray-200 bg-white px-2.5 py-1 text-xs text-gray-400">
+          {loaded && !error ? (
+            <ProviderBadges
+              newsType={newsProviderType}
+              marketType={marketProviderType}
+              fetchedAt={fetchedAt}
+              showDisclaimer
+            />
+          ) : (
+            <span className="inline-flex items-center rounded-full border border-gray-200 bg-white px-2.5 py-1 text-xs text-gray-400">
               참고용 · 매매 추천 아님
             </span>
-          </div>
+          )}
         </div>
 
         {/* Loading skeletons */}
@@ -601,6 +1011,12 @@ export function MarketRecommendations() {
         {/* Loaded with candidates */}
         {loaded && !error && candidates.length > 0 && (
           <>
+            {/* Market mood + trader strip */}
+            <div className="space-y-4">
+              <MarketMoodCard candidates={candidates} />
+              <TradingDashboardStrip candidates={candidates} sectorRotation={sectorRotation} />
+            </div>
+
             {/* Sticky summary bar */}
             <SummaryBar
               topTheme={topTheme}
@@ -715,6 +1131,16 @@ export function MarketRecommendations() {
                   {sortedFiltered.map((c) => <CandidateCard key={c.stock.ticker} candidate={c} />)}
                 </div>
               )
+            )}
+
+            {/* Diagnostics panel — visible only with ?debug=1 */}
+            {debugMode && flowCtx && sectorRotation && (
+              <DebugPanel
+                candidates={candidates}
+                flowCtx={flowCtx}
+                sectorRotation={sectorRotation}
+                fetchedAt={fetchedAt}
+              />
             )}
           </>
         )}

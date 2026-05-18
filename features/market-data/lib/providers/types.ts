@@ -4,6 +4,7 @@ export interface MarketDataQuery {
   sector?: string;
   marketType?: 'KOSPI' | 'KOSDAQ';
   limit?: number;
+  tickers?: string[];
 }
 
 export interface MarketDataProvider {

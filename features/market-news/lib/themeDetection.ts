@@ -9,6 +9,10 @@ export interface DetectedTheme {
   sentimentSummary: 'positive' | 'negative' | 'neutral';
   representativeHeadline: string;
   matchConfidence: number;     // 0–100: average keyword-match quality across matched articles
+  // ── Freshness diagnostics ────────────────────────────────────────────────────
+  freshnessScore: number;      // 0.0–1.0 average freshness of matched articles
+  newestArticleAt: string;     // ISO of most recently published matched article
+  oldestArticleAt: string;     // ISO of oldest matched article
 }
 
 // ── Debug types ───────────────────────────────────────────────────────────────
@@ -73,6 +77,7 @@ function calcArticleConfidence(strongCount: number, weakCount: number): number {
 interface ArticleMatch {
   article: NewsArticle;
   confidence: number;
+  matchedKeywords: string[]; // strong + weak keywords that fired
 }
 
 function matchArticle(article: NewsArticle, theme: ThemeDefinition): ArticleMatch | null {
@@ -80,12 +85,16 @@ function matchArticle(article: NewsArticle, theme: ThemeDefinition): ArticleMatc
 
   if (theme.exclusionKeywords.some((kw) => text.includes(kw.toLowerCase()))) return null;
 
-  const strongCount = theme.strongKeywords.filter((kw) => text.includes(kw.toLowerCase())).length;
-  const weakCount   = theme.weakKeywords.filter((kw) => text.includes(kw.toLowerCase())).length;
+  const matchedStrong = theme.strongKeywords.filter((kw) => text.includes(kw.toLowerCase()));
+  const matchedWeak   = theme.weakKeywords.filter((kw) => text.includes(kw.toLowerCase()));
 
-  if (strongCount === 0 && weakCount < 2) return null;
+  if (matchedStrong.length === 0 && matchedWeak.length < 2) return null;
 
-  return { article, confidence: calcArticleConfidence(strongCount, weakCount) };
+  return {
+    article,
+    confidence: calcArticleConfidence(matchedStrong.length, matchedWeak.length),
+    matchedKeywords: [...matchedStrong, ...matchedWeak],
+  };
 }
 
 type Sentiment = 'positive' | 'negative' | 'neutral';
@@ -107,29 +116,77 @@ function majorSentiment(sentiments: Sentiment[]): Sentiment {
   return 'neutral';
 }
 
-function calcStrength(newsCount: number, sentiment: Sentiment): number {
-  const frequencyScore = Math.min(newsCount * 20, 100);
+function calcStrength(weightedCount: number, sentiment: Sentiment): number {
+  const frequencyScore = Math.min(weightedCount * 20, 100);
   const sentimentBonus = sentiment === 'positive' ? 10 : sentiment === 'negative' ? -10 : 0;
   return Math.min(Math.max(frequencyScore + sentimentBonus, 0), 100);
 }
 
-// ── Main export ───────────────────────────────────────────────────────────────
+// ── Freshness scoring ─────────────────────────────────────────────────────────
 
-export function detectThemes(articles: NewsArticle[]): DetectedTheme[] {
+export function calcFreshness(publishedAt: string): number {
+  const ageMinutes = (Date.now() - new Date(publishedAt).getTime()) / (1000 * 60);
+  if (ageMinutes <= 10)   return 1.0;
+  if (ageMinutes <= 30)   return 0.9;
+  if (ageMinutes <= 60)   return 0.75;
+  if (ageMinutes <= 180)  return 0.5;
+  if (ageMinutes <= 1440) return 0.25;
+  return 0.1;
+}
+
+export function calcAgeMinutes(publishedAt: string): number {
+  return (Date.now() - new Date(publishedAt).getTime()) / (1000 * 60);
+}
+
+// ── Trace types (used by candidates route for news→candidate diagnostics) ─────
+
+export interface ThemeArticleMatch {
+  title: string;
+  source: string;
+  publishedAt: string;
+  matchedKeywords: string[];
+  freshnessScore: number;
+}
+
+// ── Core builder (shared by detectThemes and detectThemesWithTraces) ──────────
+
+function buildThemes(articles: NewsArticle[]): {
+  themes: DetectedTheme[];
+  traceMap: Map<string, ThemeArticleMatch[]>;
+} {
   const themes: DetectedTheme[] = [];
+  const traceMap = new Map<string, ThemeArticleMatch[]>();
 
   for (const theme of THEME_DEFINITIONS) {
     const matches: ArticleMatch[] = [];
     const sentiments: Sentiment[] = [];
+    const traceEntries: ThemeArticleMatch[] = [];
 
     for (const article of articles) {
       const match = matchArticle(article, theme);
       if (!match) continue;
       matches.push(match);
       sentiments.push(scoreArticleSentiment(article, theme));
+      traceEntries.push({
+        title: article.title,
+        source: article.source,
+        publishedAt: article.publishedAt,
+        matchedKeywords: match.matchedKeywords,
+        freshnessScore: calcFreshness(article.publishedAt),
+      });
     }
 
     if (matches.length === 0) continue;
+
+    const freshnessPerArticle = traceEntries.map((e) => e.freshnessScore);
+    const avgFreshness = freshnessPerArticle.reduce((s, f) => s + f, 0) / freshnessPerArticle.length;
+    const weightedCount = freshnessPerArticle.reduce((s, f) => s + f, 0);
+
+    const publishedTimes = matches.map((m) => new Date(m.article.publishedAt).getTime());
+    const newestAt = new Date(Math.max(...publishedTimes)).toISOString();
+    const oldestAt = new Date(Math.min(...publishedTimes)).toISOString();
+
+    traceMap.set(theme.id, traceEntries);
 
     const sentimentSummary = majorSentiment(sentiments);
     const matchConfidence = Math.round(
@@ -144,16 +201,31 @@ export function detectThemes(articles: NewsArticle[]): DetectedTheme[] {
       id: theme.id,
       name: theme.name,
       newsCount: matches.length,
-      strengthScore: calcStrength(matches.length, sentimentSummary),
+      strengthScore: calcStrength(weightedCount, sentimentSummary),
       sentimentSummary,
       representativeHeadline: representative.article.title,
       matchConfidence,
+      freshnessScore: Math.round(avgFreshness * 100) / 100,
+      newestArticleAt: newestAt,
+      oldestArticleAt: oldestAt,
     });
   }
 
-  return themes
-    .sort((a, b) => b.strengthScore - a.strengthScore)
-    .slice(0, TOP_N);
+  const sorted = themes.sort((a, b) => b.strengthScore - a.strengthScore).slice(0, TOP_N);
+  return { themes: sorted, traceMap };
+}
+
+// ── Main exports ───────────────────────────────────────────────────────────────
+
+export function detectThemes(articles: NewsArticle[]): DetectedTheme[] {
+  return buildThemes(articles).themes;
+}
+
+export function detectThemesWithTraces(articles: NewsArticle[]): {
+  themes: DetectedTheme[];
+  traceMap: Map<string, ThemeArticleMatch[]>;
+} {
+  return buildThemes(articles);
 }
 
 // ── Debug variant ─────────────────────────────────────────────────────────────

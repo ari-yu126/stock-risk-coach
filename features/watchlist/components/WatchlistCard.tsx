@@ -1,10 +1,19 @@
 import { WatchlistItem, AttentionLevel, RiskLevel } from '../types';
 import { RiskBadge } from './RiskBadge';
+import { detectSurgeSignals, type SurgeLevel } from '../lib/surgeDetection';
+import { getIntradaySeries } from '../lib/intradayData';
+import { Sparkline } from './Sparkline';
 
 interface WatchlistCardProps {
   item: WatchlistItem;
   onRemove: (ticker: string) => void;
 }
+
+const SURGE_BADGE: Record<Exclude<SurgeLevel, 'none'>, { bg: string; text: string; border: string }> = {
+  medium:   { bg: 'bg-yellow-50',  text: 'text-yellow-700', border: 'border-yellow-300' },
+  high:     { bg: 'bg-orange-50',  text: 'text-orange-700', border: 'border-orange-300' },
+  critical: { bg: 'bg-red-50',     text: 'text-red-700',    border: 'border-red-400'    },
+};
 
 const SCORE_BAR_COLOR: Record<RiskLevel, string> = {
   '낮음': 'bg-emerald-500',
@@ -39,10 +48,11 @@ export function WatchlistCard({ item, onRemove }: WatchlistCardProps) {
   const { stock, riskScore } = item;
   const isUp = stock.changePercent >= 0;
   const attn = ATTENTION_STYLES[riskScore.attentionLevel];
+  const surge = detectSurgeSignals(stock);
+  const series = getIntradaySeries(stock.ticker, stock.changePercent);
 
   return (
     <div className="flex flex-col rounded-xl border border-gray-200 bg-white shadow-sm">
-
       {/* ── Header ── */}
       <div className="flex items-start justify-between px-5 pt-5">
         <div>
@@ -63,15 +73,36 @@ export function WatchlistCard({ item, onRemove }: WatchlistCardProps) {
         </button>
       </div>
 
-      {/* ── Current Price ── */}
+      {/* ── Surge badges ── */}
+      {surge.level !== 'none' && (
+        <div className="mt-2 flex flex-wrap gap-1.5 px-5">
+          {surge.signals.map((sig) => {
+            const style = SURGE_BADGE[sig.level as Exclude<SurgeLevel, 'none'>];
+            return (
+              <span
+                key={sig.type}
+                className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-semibold ${style.bg} ${style.text} ${style.border}`}
+              >
+                {sig.label}
+                <span className="font-normal opacity-70">{sig.detail}</span>
+              </span>
+            );
+          })}
+        </div>
+      )}
+
+      {/* ── Current Price + Sparkline ── */}
       <div className="mt-3 flex items-end justify-between px-5">
-        <p className="text-2xl font-bold text-gray-900">
-          {fmt(stock.price)}
-          <span className="ml-1 text-sm font-normal text-gray-400">원</span>
-        </p>
-        <p className={`text-sm font-semibold ${isUp ? 'text-red-500' : 'text-blue-500'}`}>
-          {isUp ? '▲' : '▼'} {isUp ? '+' : ''}{stock.changePercent.toFixed(1)}%
-        </p>
+        <div>
+          <p className="text-2xl font-bold text-gray-900">
+            {fmt(stock.price)}
+            <span className="ml-1 text-sm font-normal text-gray-400">원</span>
+          </p>
+          <p className={`text-sm font-semibold ${isUp ? 'text-red-500' : 'text-blue-500'}`}>
+            {isUp ? '▲' : '▼'} {isUp ? '+' : ''}{stock.changePercent.toFixed(1)}%
+          </p>
+        </div>
+        <Sparkline points={series.points} trend={series.trend} width={80} height={32} />
       </div>
 
       {/* ── Risk Level ── */}

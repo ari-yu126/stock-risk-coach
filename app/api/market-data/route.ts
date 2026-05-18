@@ -36,7 +36,12 @@ export async function GET(request: NextRequest): Promise<Response> {
   const limit = searchParams.get('limit') ? Number(searchParams.get('limit')) : undefined;
   const noCache = searchParams.get('noCache') === '1';
 
-  const query: MarketDataQuery = { sector, marketType, limit };
+  const tickersParam = searchParams.get('tickers');
+  const tickers = tickersParam
+    ? tickersParam.split(',').map((t) => t.trim()).filter((t) => /^\d{1,6}$/.test(t)).sort()
+    : undefined;
+
+  const query: MarketDataQuery = { sector, marketType, limit, tickers };
   const cacheKey = `market-data:${JSON.stringify(query)}`;
 
   if (noCache) {

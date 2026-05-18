@@ -1,6 +1,12 @@
 'use client';
 
 import { useState, useEffect, useCallback, useRef } from 'react';
+import {
+  getNotificationSettings,
+  saveNotificationSettings,
+  requestNotificationPermission,
+  notificationPermissionState,
+} from '../lib/notifications';
 import type { MarketStock } from '@/features/market-data/types';
 import type { MarketDataResponse, MarketDataProviderType } from '@/features/market-data/lib/providers/types';
 import type { WatchlistItem } from '../types';
@@ -10,15 +16,39 @@ import { Button } from '@/components/ui/Button';
 import { MOCK_STOCKS, DEFAULT_WATCHLIST_TICKERS } from '../lib/mock-data';
 import { loadTickers, saveTickers } from '../lib/storage';
 import { calculateRisk } from '../lib/scoring';
+import { detectSurgeSignals } from '../lib/surgeDetection';
+import { recordSnapshot } from '../lib/momentumHistory';
+import { getMarketSession } from '@/features/market-news/lib/marketSession';
 
-const AUTO_REFRESH_MS = 30_000;
+// ── Adaptive polling intervals (ms) ──────────────────────────────────────────
+const INTERVAL_CLOSED    = 5 * 60_000;   // 5 min — market closed
+const INTERVAL_PREMARKET = 60_000;        // 1 min — premarket
+const INTERVAL_INTRADAY  = 30_000;        // 30 s  — normal intraday
+const INTERVAL_SURGE     = 10_000;        // 10 s  — active surge detected
+
+function computeInterval(stocks: MarketStock[], session: string): number {
+  if (session === 'premarket') return INTERVAL_PREMARKET;
+  if (session === 'after-market') return INTERVAL_CLOSED;
+  if (session === 'intraday') {
+    const hasSurge = stocks.some((s) => {
+      const { level } = detectSurgeSignals(s);
+      return level === 'high' || level === 'critical';
+    });
+    return hasSurge ? INTERVAL_SURGE : INTERVAL_INTRADAY;
+  }
+  return INTERVAL_CLOSED; // weekend / unknown
+}
 
 function fmtTime(iso: string): string {
   const d = new Date(iso);
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 }
 
-// Convert mock Stock → MarketStock for fallback
+function fmtInterval(ms: number): string {
+  if (ms >= 60_000) return `${ms / 60_000}분`;
+  return `${ms / 1_000}초`;
+}
+
 const MOCK_AS_MARKET: MarketStock[] = MOCK_STOCKS.map((s) => ({
   ...s,
   tradingValue: Math.round((s.price * s.volume) / 100_000_000),
@@ -33,19 +63,57 @@ export function WatchlistDashboard() {
   const [fetchedAt, setFetchedAt] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [modalOpen, setModalOpen] = useState(false);
+  const [notifEnabled, setNotifEnabled] = useState(false);
+  const [notifPermission, setNotifPermission] = useState<'granted' | 'denied' | 'default' | 'unsupported'>('default');
+  const [pollingInterval, setPollingInterval] = useState(INTERVAL_INTRADAY);
 
-  const isFirstLoad = useRef(true);
+  const isFirstLoad   = useRef(true);
+  const tickersRef    = useRef(tickers);
+  const allStocksRef  = useRef(allStocks);
+  const intervalIdRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const hiddenRef     = useRef(false);
+
+  tickersRef.current   = tickers;   // eslint-disable-line react-hooks/refs
+  allStocksRef.current = allStocks; // eslint-disable-line react-hooks/refs
+
+  // ── Core fetch ────────────────────────────────────────────────────────────
 
   const refresh = useCallback(async () => {
+    if (hiddenRef.current) return; // pause when tab is hidden
     try {
-      const r = await fetch('/api/market-data');
+      const currentTickers = tickersRef.current;
+      const url = currentTickers.length > 0
+        ? `/api/market-data?tickers=${currentTickers.join(',')}`
+        : '/api/market-data';
+      const r = await fetch(url);
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const data = (await r.json()) as MarketDataResponse;
+
       setAllStocks(data.stocks);
       setProviderType(data.providerType);
       setFetchedAt(data.fetchedAt);
+
+      // Record momentum snapshots for watched tickers
+      const now = Date.now();
+      for (const stock of data.stocks) {
+        if (!currentTickers.includes(stock.ticker)) continue;
+        const { level } = detectSurgeSignals(stock);
+        recordSnapshot({
+          ticker: stock.ticker,
+          timestamp: now,
+          price: stock.price,
+          volume: stock.volume,
+          changePercent: stock.changePercent,
+          surgeLevel: level,
+        });
+      }
+
+      // Recompute adaptive interval
+      const { session } = getMarketSession();
+      const next = computeInterval(data.stocks, session);
+      setPollingInterval(next);
     } catch {
-      // First load: keep MOCK_AS_MARKET (already set). Subsequent: keep last good data.
+      // Keep last good data; do not reset loading state on refresh failure.
     } finally {
       if (isFirstLoad.current) {
         isFirstLoad.current = false;
@@ -54,26 +122,51 @@ export function WatchlistDashboard() {
     }
   }, []);
 
-  // Load persisted tickers on mount (client-only; runs after SSR hydration).
-  useEffect(() => {
-    setTickers(loadTickers()); // eslint-disable-line react-hooks/set-state-in-effect
-  }, []);
+  // ── Adaptive interval scheduling ─────────────────────────────────────────
 
   useEffect(() => {
-    // All setState calls inside refresh() are async (after await), not synchronous.
-    void refresh(); // eslint-disable-line react-hooks/set-state-in-effect
-    const id = setInterval(() => void refresh(), AUTO_REFRESH_MS);
-    return () => clearInterval(id);
+    if (intervalIdRef.current !== null) clearInterval(intervalIdRef.current);
+    intervalIdRef.current = setInterval(() => void refresh(), pollingInterval);
+    return () => {
+      if (intervalIdRef.current !== null) clearInterval(intervalIdRef.current);
+    };
+  }, [pollingInterval, refresh]);
+
+  // ── Visibility-aware polling ──────────────────────────────────────────────
+
+  useEffect(() => {
+    function onVisibility() {
+      hiddenRef.current = document.visibilityState === 'hidden';
+      if (!hiddenRef.current) void refresh(); // catch up when tab becomes visible
+    }
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => document.removeEventListener('visibilitychange', onVisibility);
   }, [refresh]);
 
-  // Derive watchlist from watched tickers + live stock data
+  // ── Mount: load persisted tickers + settings, initial fetch ──────────────
+
+  useEffect(() => {
+    const persisted = loadTickers();
+    tickersRef.current = persisted;
+    setTickers(persisted); // eslint-disable-line react-hooks/set-state-in-effect
+    const settings = getNotificationSettings();
+    setNotifEnabled(settings.enabled);
+    setNotifPermission(notificationPermissionState());
+    void refresh();
+  }, [refresh]);
+
+  // ── Watchlist derivation ─────────────────────────────────────────────────
+
   const watchlist: WatchlistItem[] = tickers
     .map((ticker) => allStocks.find((s) => s.ticker === ticker))
     .filter((s): s is MarketStock => s !== undefined)
     .map((s) => ({ stock: s, riskScore: calculateRisk(s) }));
 
+  // ── Handlers ─────────────────────────────────────────────────────────────
+
   function handleAdd(ticker: string) {
     const next = [...tickers, ticker];
+    tickersRef.current = next;
     setTickers(next);
     saveTickers(next);
     void refresh();
@@ -85,6 +178,22 @@ export function WatchlistDashboard() {
     saveTickers(next);
   }
 
+  async function handleNotifToggle() {
+    if (!notifEnabled) {
+      const granted = await requestNotificationPermission();
+      setNotifPermission(notificationPermissionState());
+      if (granted) {
+        setNotifEnabled(true);
+        saveNotificationSettings({ enabled: true });
+      }
+    } else {
+      setNotifEnabled(false);
+      saveNotificationSettings({ enabled: false });
+    }
+  }
+
+  // ── Render ────────────────────────────────────────────────────────────────
+
   return (
     <section>
       <div className="mb-5 flex flex-wrap items-start justify-between gap-3">
@@ -93,7 +202,7 @@ export function WatchlistDashboard() {
           <p className="text-sm text-gray-500">{tickers.length}개 종목</p>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2">
+        <div className="flex flex-wrap items-start gap-2">
           {/* Provider badge + update time */}
           {!loading && (
             <div className="flex flex-col items-end gap-1">
@@ -110,10 +219,33 @@ export function WatchlistDashboard() {
               )}
               {fetchedAt && (
                 <span className="text-[11px] text-gray-400">
-                  업데이트 {fmtTime(fetchedAt)} · {AUTO_REFRESH_MS / 1000}초마다 자동갱신
+                  업데이트 {fmtTime(fetchedAt)} · {fmtInterval(pollingInterval)}마다 자동갱신
                 </span>
               )}
             </div>
+          )}
+
+          {/* Notification toggle */}
+          {notifPermission !== 'unsupported' && notifPermission !== 'denied' && (
+            <button
+              onClick={() => void handleNotifToggle()}
+              aria-pressed={notifEnabled}
+              aria-label={notifEnabled ? '알림 끄기' : '알림 켜기'}
+              title={notifEnabled ? '알림 켜짐' : '알림 꺼짐'}
+              className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-medium transition-colors ${
+                notifEnabled
+                  ? 'border-blue-300 bg-blue-50 text-blue-700'
+                  : 'border-gray-200 bg-white text-gray-400 hover:border-gray-300 hover:text-gray-600'
+              }`}
+            >
+              <svg aria-hidden="true" className="h-3 w-3" viewBox="0 0 16 16" fill={notifEnabled ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="1.6">
+                <path d="M8 1a5 5 0 0 1 5 5v3l1.5 2H1.5L3 9V6a5 5 0 0 1 5-5zM6.5 13.5a1.5 1.5 0 0 0 3 0" strokeLinecap="round" />
+              </svg>
+              알림
+            </button>
+          )}
+          {notifPermission === 'denied' && (
+            <span className="text-[11px] text-gray-400">알림 차단됨</span>
           )}
 
           {/* Manual refresh */}
@@ -153,7 +285,6 @@ export function WatchlistDashboard() {
           {watchlist.map((item) => (
             <WatchlistCard key={item.stock.ticker} item={item} onRemove={handleRemove} />
           ))}
-          {/* Placeholder for tickers with no live data yet */}
           {tickers
             .filter((t) => !allStocks.some((s) => s.ticker === t))
             .map((t) => (

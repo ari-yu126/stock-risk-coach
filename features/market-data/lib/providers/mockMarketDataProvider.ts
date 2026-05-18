@@ -236,7 +236,7 @@ const MOCK_STOCKS: Omit<MarketStock, 'priceSource'>[] = [
   },
   {
     ticker: '035420',
-    name: 'NAVER',
+    name: '네이버',
     sector: '플랫폼',
     price: 188000,
     changePercent: -1.4,

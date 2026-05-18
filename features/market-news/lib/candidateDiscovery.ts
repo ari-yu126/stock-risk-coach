@@ -1,5 +1,5 @@
 import type { MarketStock } from '../../market-data/types';
-import type { DetectedTheme } from './themeDetection';
+import type { DetectedTheme, ThemeArticleMatch } from './themeDetection';
 import { calculateRisk } from '../../watchlist/lib/scoring';
 import type { RiskScore, RiskLevel, AttentionLevel } from '../../watchlist/types';
 import type { RecommendationAction } from '../types';
@@ -7,8 +7,32 @@ import type { RecommendationAction } from '../types';
 // Reuse the same four-value label type — values are identical.
 export type JudgmentLabel = RecommendationAction;
 
+// ── Foreign-news detection ────────────────────────────────────────────────────
+// Korean financial news frequently references US companies and macro events.
+// These keywords identify articles where overseas market developments drove the story.
+
+const FOREIGN_MARKET_KEYWORDS = [
+  // US tech companies commonly cited in Korean sector news
+  '엔비디아', 'nvidia', 'tsmc', 'amd', '인텔', 'intel',
+  '마이크로소프트', 'microsoft', '애플', 'apple',
+  '구글', 'google', '아마존', 'amazon', '메타', 'meta',
+  '퀄컴', 'qualcomm', 'broadcom',
+  // US market indices and venues
+  '나스닥', '뉴욕 증시', '뉴욕증시', '미국 증시', '미 증시', 's&p',
+  // US Federal Reserve / macro
+  '연준', 'fomc', '파월', '미 연준', '기준금리 인상',
+  // Other foreign markets
+  '닛케이', '항셍', '상하이 증시',
+];
+
+export function isForeignInfluenced(title: string, description: string): boolean {
+  const text = `${title} ${description}`.toLowerCase();
+  return FOREIGN_MARKET_KEYWORDS.some((kw) => text.includes(kw.toLowerCase()));
+}
+
 // Per-component breakdown exposed so the UI can explain each score to the user.
 export interface CandidateScoreBreakdown {
+  // ── Static snapshot scoring (server-computed) ─────────────────────────────
   themeScore: number;   // 0–40  primary signal: how active the news theme is
   volumeScore: number;  // 0–25  unusual trading activity vs 20-day average
   priceScore: number;   // 0–15  size of today's price move (abs %)
@@ -16,6 +40,12 @@ export interface CandidateScoreBreakdown {
   riskScore: number;    // 0–10  beginner accessibility: lower risk = higher bonus
   total: number;        // 0–100 sum, clamped
   volumeRatio: number;  // raw ratio (volume / avgVolume) for display
+  // ── Flow-based adjustments (client-computed, 0 until enriched) ────────────
+  freshnessBonus: number;      // 0–5   fresher news → higher theme score
+  momentumBonus: number;       // 0–5   accelerating momentum
+  overheatPenalty: number;     // 0–15  subtracted: FOMO/overextension
+  sectorLeaderBonus: number;   // 0–5   leading sector gets extra weight
+  flowTotal: number;           // total after flow adjustments, clamped 0–100
 }
 
 export interface StockCandidate {
@@ -29,6 +59,12 @@ export interface StockCandidate {
   cautionReason: string;
   judgmentLabel: JudgmentLabel;
   judgmentExplanation: string;
+  // ── News trace (diagnostics) ─────────────────────────────────────────────────
+  matchedNewsHeadlines: string[];    // up to 3 headlines from matched theme articles
+  matchedNewsSources: string[];      // sources corresponding to matchedNewsHeadlines
+  matchedNewsPublishedAt: string[];  // ISO timestamps corresponding to matchedNewsHeadlines
+  matchedNewsKeywords: string[];     // deduplicated keywords that fired across matched articles
+  isForeignNewsInfluenced: boolean;  // any matched article references foreign market/companies
 }
 
 // ── Sector → theme-id mapping ─────────────────────────────────────────────────
@@ -183,6 +219,12 @@ function calcCandidateScore(
     riskScore,
     total,
     volumeRatio: stock.volume / stock.avgVolume,
+    // Flow fields default to 0; enriched client-side via enrichWithFlowScores()
+    freshnessBonus: 0,
+    momentumBonus: 0,
+    overheatPenalty: 0,
+    sectorLeaderBonus: 0,
+    flowTotal: total,
   };
 }
 
@@ -273,11 +315,131 @@ function buildDiscoveryReason(theme: DetectedTheme, stock: MarketStock): string 
   return parts.join(' · ');
 }
 
+// ── News trace helpers ────────────────────────────────────────────────────────
+
+function buildNewsTrace(
+  themeId: string,
+  traceMap: Map<string, ThemeArticleMatch[]>,
+): Pick<StockCandidate, 'matchedNewsHeadlines' | 'matchedNewsSources' | 'matchedNewsPublishedAt' | 'matchedNewsKeywords' | 'isForeignNewsInfluenced'> {
+  const articles = traceMap.get(themeId) ?? [];
+
+  // Most-recent first, cap at 3 for display
+  const sorted = [...articles].sort(
+    (a, b) => new Date(b.publishedAt).getTime() - new Date(a.publishedAt).getTime(),
+  ).slice(0, 3);
+
+  const matchedNewsHeadlines  = sorted.map((a) => a.title);
+  const matchedNewsSources    = sorted.map((a) => a.source);
+  const matchedNewsPublishedAt = sorted.map((a) => a.publishedAt);
+
+  // Deduplicated union of all keywords across every matched article (frequency-ordered)
+  const kwFreq = new Map<string, number>();
+  for (const a of articles) {
+    for (const kw of a.matchedKeywords) {
+      kwFreq.set(kw, (kwFreq.get(kw) ?? 0) + 1);
+    }
+  }
+  const matchedNewsKeywords = [...kwFreq.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .map(([kw]) => kw)
+    .slice(0, 8);
+
+  const isForeignNewsInfluenced = articles.some((a) => isForeignInfluenced(a.title, ''));
+
+  return { matchedNewsHeadlines, matchedNewsSources, matchedNewsPublishedAt, matchedNewsKeywords, isForeignNewsInfluenced };
+}
+
+// ── Flow-based score enrichment (TASK 4) — client-side only ─────────────────
+// Called after candidates are fetched, using localStorage momentum data and
+// sector leadership derived from the full candidate list.
+
+export interface FlowEnrichmentContext {
+  leadingSectorNames: Set<string>;             // from sectorRotation
+  momentumDirections: Map<string, 'accelerating' | 'fading' | 'sideways'>; // ticker → direction
+  fomoScores: Map<string, number>;             // ticker → FOMO score 0–100
+}
+
+export function enrichWithFlowScores(
+  candidates: StockCandidate[],
+  ctx: FlowEnrichmentContext,
+): StockCandidate[] {
+  return candidates.map((c) => {
+    const breakdown = { ...c.scoreBreakdown };
+
+    // Freshness bonus: high freshnessScore = stronger theme signal
+    const freshness = c.matchedTheme.freshnessScore ?? 0.5;
+    breakdown.freshnessBonus = Math.round((freshness - 0.5) * 10);  // -5 to +5
+
+    // Momentum bonus
+    const dir = ctx.momentumDirections.get(c.stock.ticker);
+    breakdown.momentumBonus = dir === 'accelerating' ? 5 : dir === 'fading' ? -3 : 0;
+
+    // Overheat penalty
+    const fomoScore = ctx.fomoScores.get(c.stock.ticker) ?? 0;
+    breakdown.overheatPenalty = Math.round(fomoScore * 0.15);  // max 15
+
+    // Sector leader bonus
+    breakdown.sectorLeaderBonus = ctx.leadingSectorNames.has(c.stock.sector) ? 5 : 0;
+
+    breakdown.flowTotal = Math.min(
+      Math.max(
+        breakdown.total +
+        breakdown.freshnessBonus +
+        breakdown.momentumBonus +
+        breakdown.sectorLeaderBonus -
+        breakdown.overheatPenalty,
+        0,
+      ),
+      100,
+    );
+
+    return { ...c, scoreBreakdown: breakdown, candidateScore: breakdown.flowTotal };
+  });
+}
+
+// ── Candidate narrative (TASK 6) ─────────────────────────────────────────────
+
+export function generateCandidateNarrative(candidate: StockCandidate): string {
+  const { stock, scoreBreakdown, matchedTheme, riskScore, matchedNewsKeywords } = candidate;
+  const volumeRatio = scoreBreakdown.volumeRatio;
+  const absChange = Math.abs(stock.changePercent);
+  const dir = stock.changePercent >= 0 ? '상승' : '하락';
+  const parts: string[] = [];
+
+  if (volumeRatio >= 3) {
+    parts.push(`거래량이 평균 대비 ${volumeRatio.toFixed(0)}배 급증했고`);
+  } else if (volumeRatio >= 1.5) {
+    parts.push(`거래량이 평균 대비 ${volumeRatio.toFixed(1)}배 늘어났고`);
+  }
+
+  const topKeywords = matchedNewsKeywords.slice(0, 2);
+  if (topKeywords.length > 0) {
+    parts.push(`${topKeywords.join('·')} 관련 뉴스가 집중되며`);
+  } else {
+    parts.push(`${matchedTheme.name} 테마가 활성화되며`);
+  }
+
+  if (absChange >= 5) {
+    parts.push(`단기 모멘텀이 강화되고 있습니다.`);
+  } else if (absChange >= 2) {
+    parts.push(`${dir} ${absChange.toFixed(1)}% 움직임이 나타나고 있습니다.`);
+  } else {
+    parts.push(`방향성이 형성되는 초기 단계입니다.`);
+  }
+
+  if (riskScore.level === '위험' || riskScore.level === '높음') {
+    parts.push(`다만 리스크 수준이 높아 신중한 접근이 필요합니다.`);
+  }
+
+  return parts.join(' ');
+}
+
 // ── Main export ───────────────────────────────────────────────────────────────
 
 export function discoverCandidates(
   themes: DetectedTheme[],
   stocks: MarketStock[],
+  traceMap: Map<string, ThemeArticleMatch[]> = new Map(),
 ): StockCandidate[] {
   // Build a quick lookup so matching is O(1) per stock.
   const themeById = new Map(themes.map((t) => [t.id, t]));
@@ -320,6 +482,7 @@ export function discoverCandidates(
       cautionReason: CAUTION_NOTES[riskScore.level],
       judgmentLabel,
       judgmentExplanation,
+      ...buildNewsTrace(matchedTheme.id, traceMap),
     });
   }
 
