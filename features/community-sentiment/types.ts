@@ -52,13 +52,21 @@ export interface CommunityStockItem {
   priceChangePercent: number;
 }
 
+import type { CommunityCollectDebug } from './lib/collectDebug';
+
 export interface CommunitySentimentResponse {
   items: CommunityStockItem[];
   collectedAt: string;
   providerType: 'mock' | 'live';
+  /** UI: live = real collect, mock = sample fallback */
+  dataKind: 'live' | 'mock';
   nextCollectAt: string;
+  /** Human-readable data source line when providerType is live */
+  sourcesNote?: string;
   cacheHit?: boolean;
   cacheAgeMs?: number | null;
+  /** Server-side collect diagnostics (always attached; dev UI shows detail) */
+  debug?: CommunityCollectDebug;
 }
 
 /** Pluggable analyzer — swap for LLM later */

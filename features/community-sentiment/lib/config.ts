@@ -37,3 +37,13 @@ export const SCORE_WEIGHTS = {
 
 export const COLLECT_INTERVAL_MS = 60 * 60 * 1000;
 export const DATA_RETENTION_HOURS = 24;
+
+/** Tickers scanned each collect cycle (Naver discuss + search). */
+export const COMMUNITY_TRACK_TICKERS = [
+  '005930', '000660', '042700', '086520', '247540',
+  '277810', '035420', '068270', '005380', '373220',
+  '196170', '035720',
+] as const;
+
+export const DISCUSS_PAGE_SIZE = 25;
+export const NAVER_SEARCH_DISPLAY = 8;

@@ -141,6 +141,12 @@ export const STOCK_CATALOG: CatalogEntry[] = [
   { ticker: '267250', name: 'HD현대',          marketType: 'KOSPI'  },
 ];
 
+const CATALOG_BY_TICKER = new Map(STOCK_CATALOG.map((e) => [e.ticker, e]));
+
+export function getCatalogEntry(ticker: string): CatalogEntry | undefined {
+  return CATALOG_BY_TICKER.get(ticker);
+}
+
 // ── Search ────────────────────────────────────────────────────────────────────
 
 function score(entry: CatalogEntry, q: string): number {

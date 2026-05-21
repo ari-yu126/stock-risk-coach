@@ -188,6 +188,7 @@ export function collectMockCommunitySentiment(): CommunitySentimentResponse {
     items,
     collectedAt,
     providerType: 'mock',
+    dataKind: 'mock',
     nextCollectAt: new Date(now + 60 * 60 * 1000).toISOString(),
   };
 }

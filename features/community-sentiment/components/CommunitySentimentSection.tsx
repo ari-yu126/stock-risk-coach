@@ -4,6 +4,11 @@ import { useState, useEffect, useMemo } from 'react';
 import type { CommunityRiskLevel, CommunitySentimentResponse, CommunityStockItem } from '../types';
 import { CommunityStockCard } from './CommunityStockCard';
 import { CommunityDetailModal } from './CommunityDetailModal';
+import { CommunityDataBanner } from './CommunityDataBanner';
+import { CommunityDebugPanel } from './CommunityDebugPanel';
+import { CommunitySourceStatusBar } from './CommunitySourceStatusBar';
+
+const IS_DEV = process.env.NODE_ENV === 'development';
 
 type RiskFilter = 'ALL' | CommunityRiskLevel;
 type SortKey = 'score' | 'mention' | 'sentiment';
@@ -24,9 +29,10 @@ export function CommunitySentimentSection() {
 
   useEffect(() => {
     let cancelled = false;
-    fetch('/api/community-sentiment')
+    const url = IS_DEV ? '/api/community-sentiment?noCache=1' : '/api/community-sentiment';
+    fetch(url)
       .then((r) => {
-        if (!r.ok) throw new Error('fetch failed');
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
         return r.json() as Promise<CommunitySentimentResponse>;
       })
       .then((res) => {
@@ -68,22 +74,35 @@ export function CommunitySentimentSection() {
         <div>
           <h3 className="text-base font-semibold text-gray-900">커뮤니티 주목 종목</h3>
           <p className="text-sm text-gray-500">
-            종토방·디시·에펨 반응 + 시장 데이터 기반 Sentiment Dashboard
+            네이버 종목토론방 + 커뮤니티 언급 검색 + 실시간 시세
           </p>
         </div>
         {loaded && !error && data && (
           <div className="flex flex-col items-end gap-1">
-            <span className="inline-flex items-center gap-1.5 rounded-full border border-amber-200 bg-amber-50 px-2.5 py-1 text-xs font-medium text-amber-700">
-              <span className="h-1.5 w-1.5 rounded-full bg-amber-400" aria-hidden="true" />
-              MVP · 샘플 커뮤니티
+            <span
+              className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-bold ${
+                data.dataKind === 'live'
+                  ? 'border-emerald-300 bg-emerald-100 text-emerald-800'
+                  : 'border-amber-300 bg-amber-100 text-amber-900'
+              }`}
+            >
+              {data.dataKind === 'live' ? 'LIVE' : 'MOCK'}
             </span>
             <span className="text-[11px] text-gray-400">
               수집 {fmtTime(data.collectedAt)}
-              {data.cacheHit && ' · 캐시'}
+              {data.cacheHit ? ' · 캐시 HIT' : ' · 캐시 MISS'}
             </span>
           </div>
         )}
       </div>
+
+      {loaded && !error && data && <CommunityDataBanner data={data} />}
+
+      {loaded && !error && data?.debug?.sourceStatuses && (
+        <CommunitySourceStatusBar sources={data.debug.sourceStatuses} />
+      )}
+
+      {loaded && !error && data?.debug && <CommunityDebugPanel debug={data.debug} />}
 
       {/* Filters */}
       {loaded && !error && (
@@ -178,7 +197,7 @@ export function CommunitySentimentSection() {
 
       <p className="text-[11px] text-gray-400">
         Community Score = 감정(40%) + 언급증가(30%) + 거래량(20%) + 트렌드키워드(10%) ·
-        종토방 50% / 디시 30% / 에펨 20% 가중 · 1시간마다 수집(캐시)
+        종토방 50% / 디시·에펨 웹검색 50% 가중 · 1시간마다 수집(캐시)
       </p>
 
       {selected && (
