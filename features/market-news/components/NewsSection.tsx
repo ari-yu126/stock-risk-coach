@@ -1,7 +1,10 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import { ShowMoreList } from '@/components/ui/ShowMoreList';
 import type { NewsArticle, NewsResponse } from '../lib/providers/types';
+
+const NEWS_INITIAL_COUNT = 3;
 
 const FILTER_ALL = '전체';
 const FILTER_KEYWORDS = ['국내 증시', '반도체', '2차전지', '바이오', 'AI 데이터센터', '자동차'] as const;
@@ -195,7 +198,7 @@ export function NewsSection() {
       <div className="rounded-xl border border-gray-200 bg-white px-5">
         {!loaded && (
           <div role="status" aria-label="뉴스 로딩 중">
-            {Array.from({ length: 5 }).map((_, i) => <SkeletonItem key={i} />)}
+            {Array.from({ length: NEWS_INITIAL_COUNT }).map((_, i) => <SkeletonItem key={i} />)}
           </div>
         )}
 
@@ -211,9 +214,16 @@ export function NewsSection() {
           </p>
         )}
 
-        {loaded && !error && articles.map((article, i) => (
-          <ArticleItem key={`${article.link || article.title}-${i}`} article={article} />
-        ))}
+        {loaded && !error && articles.length > 0 && (
+          <ShowMoreList
+            items={articles}
+            limit={NEWS_INITIAL_COUNT}
+            resetKey={activePill}
+            getItemKey={(article, i) => `${article.link || article.title}-${i}`}
+            moreLabel={(n) => `더보기 (${n}건)`}
+            renderItem={(article) => <ArticleItem article={article} />}
+          />
+        )}
       </div>
     </section>
   );

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import {
   getNotificationSettings,
   saveNotificationSettings,
@@ -12,6 +12,10 @@ import type { MarketDataResponse, MarketDataProviderType } from '@/features/mark
 import type { WatchlistItem } from '../types';
 import { WatchlistCard } from './WatchlistCard';
 import { AddStockModal } from './AddStockModal';
+import type { EntrySignalResult } from '../lib/entrySignalTypes';
+import { resolveStockName } from '@/features/market-data/lib/resolveStockName';
+import { captureEntrySignals } from '../lib/signalCapture';
+import { evaluatePendingSignals } from '../lib/signalEvaluator';
 import { Button } from '@/components/ui/Button';
 import { MOCK_STOCKS, DEFAULT_WATCHLIST_TICKERS } from '../lib/mock-data';
 import { loadTickers, saveTickers } from '../lib/storage';
@@ -66,6 +70,8 @@ export function WatchlistDashboard() {
   const [notifEnabled, setNotifEnabled] = useState(false);
   const [notifPermission, setNotifPermission] = useState<'granted' | 'denied' | 'default' | 'unsupported'>('default');
   const [pollingInterval, setPollingInterval] = useState(INTERVAL_INTRADAY);
+  const [entrySignals, setEntrySignals] = useState<EntrySignalResult[]>([]);
+  const [signalsLoading, setSignalsLoading] = useState(false);
 
   const isFirstLoad   = useRef(true);
   const tickersRef    = useRef(tickers);
@@ -75,6 +81,40 @@ export function WatchlistDashboard() {
 
   tickersRef.current   = tickers;   // eslint-disable-line react-hooks/refs
   allStocksRef.current = allStocks; // eslint-disable-line react-hooks/refs
+
+  const refreshEntrySignals = useCallback(async (stocks: MarketStock[]) => {
+    if (stocks.length === 0) {
+      setEntrySignals([]);
+      return;
+    }
+    setSignalsLoading(true);
+    try {
+      const r = await fetch('/api/entry-signals', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          stocks: stocks.map((s) => ({
+            ticker: s.ticker,
+            name: resolveStockName(s.ticker, s.name),
+            changePercent: s.changePercent,
+            volume: s.volume,
+            avgVolume: s.avgVolume,
+          })),
+        }),
+      });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const data = (await r.json()) as { signals: EntrySignalResult[]; fetchedAt: string };
+      setEntrySignals(data.signals);
+
+      const priceByTicker = new Map(stocks.map((s) => [s.ticker, s.price]));
+      captureEntrySignals(data.signals, priceByTicker, data.fetchedAt);
+      void evaluatePendingSignals();
+    } catch {
+      // keep last signals on failure
+    } finally {
+      setSignalsLoading(false);
+    }
+  }, []);
 
   // ── Core fetch ────────────────────────────────────────────────────────────
 
@@ -112,6 +152,9 @@ export function WatchlistDashboard() {
       const { session } = getMarketSession();
       const next = computeInterval(data.stocks, session);
       setPollingInterval(next);
+
+      const watched = data.stocks.filter((s) => currentTickers.includes(s.ticker));
+      void refreshEntrySignals(watched);
     } catch {
       // Keep last good data; do not reset loading state on refresh failure.
     } finally {
@@ -120,7 +163,7 @@ export function WatchlistDashboard() {
         setLoading(false);
       }
     }
-  }, []);
+  }, [refreshEntrySignals]);
 
   // ── Adaptive interval scheduling ─────────────────────────────────────────
 
@@ -161,6 +204,16 @@ export function WatchlistDashboard() {
     .map((ticker) => allStocks.find((s) => s.ticker === ticker))
     .filter((s): s is MarketStock => s !== undefined)
     .map((s) => ({ stock: s, riskScore: calculateRisk(s) }));
+
+  const signalsByTicker = useMemo(() => {
+    const map = new Map<string, EntrySignalResult[]>();
+    for (const sig of entrySignals) {
+      const list = map.get(sig.ticker) ?? [];
+      list.push(sig);
+      map.set(sig.ticker, list);
+    }
+    return map;
+  }, [entrySignals]);
 
   // ── Handlers ─────────────────────────────────────────────────────────────
 
@@ -270,7 +323,7 @@ export function WatchlistDashboard() {
       </div>
 
       {loading ? (
-        <div role="status" aria-label="관심 종목 로딩 중" className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+        <div role="status" aria-label="관심 종목 로딩 중" className="grid grid-cols-1 gap-4 sm:grid-cols-3">
           {DEFAULT_WATCHLIST_TICKERS.map((t) => (
             <div key={t} className="h-64 animate-pulse rounded-xl border border-gray-100 bg-white" />
           ))}
@@ -281,9 +334,15 @@ export function WatchlistDashboard() {
           <p className="mt-1 text-sm text-gray-400">위의 버튼을 눌러 종목을 추가하세요.</p>
         </div>
       ) : (
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
           {watchlist.map((item) => (
-            <WatchlistCard key={item.stock.ticker} item={item} onRemove={handleRemove} />
+            <WatchlistCard
+              key={item.stock.ticker}
+              item={item}
+              onRemove={handleRemove}
+              entrySignals={signalsByTicker.get(item.stock.ticker) ?? []}
+              signalsLoading={signalsLoading}
+            />
           ))}
           {tickers
             .filter((t) => !allStocks.some((s) => s.ticker === t))

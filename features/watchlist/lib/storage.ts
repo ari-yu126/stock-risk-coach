@@ -2,6 +2,9 @@ import { DEFAULT_WATCHLIST_TICKERS } from './mock-data';
 
 const STORAGE_KEY = 'stock-risk-coach.watchlist.v1';
 
+/** Fired on window after saveTickers (same tab). */
+export const WATCHLIST_CHANGED_EVENT = 'stock-risk-coach.watchlist-changed';
+
 /**
  * Reads persisted tickers from localStorage.
  * - Key absent / null  → first visit  → DEFAULT_WATCHLIST_TICKERS
@@ -33,6 +36,9 @@ export function loadTickers(): string[] {
 export function saveTickers(tickers: string[]): void {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(tickers));
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent(WATCHLIST_CHANGED_EVENT));
+    }
   } catch {
     // Intentionally swallowed — localStorage unavailability is non-fatal.
   }

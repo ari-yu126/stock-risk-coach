@@ -1,3 +1,4 @@
+import { resolveStockName } from '../resolveStockName';
 import type { MarketStock, PriceSource } from '../../types';
 import type { MarketDataProvider, MarketDataQuery } from './types';
 
@@ -326,8 +327,33 @@ const MOCK_STOCKS: Omit<MarketStock, 'priceSource'>[] = [
   },
 ];
 
+function stubStock(ticker: string): MarketStock {
+  const base = MOCK_STOCKS.find((s) => s.ticker === ticker);
+  if (base) return { ...base, priceSource: MOCK_PRICE_SOURCE };
+
+  const name = resolveStockName(ticker);
+  const price = 50_000 + (parseInt(ticker.slice(-3), 10) % 500) * 100;
+  return {
+    ticker,
+    name,
+    sector: '기타',
+    price,
+    changePercent: 0,
+    volume: 500_000,
+    avgVolume: 500_000,
+    marketCapBillion: 10_000,
+    tradingValue: tv(price, 500_000),
+    marketType: 'KOSPI',
+    priceSource: MOCK_PRICE_SOURCE,
+  };
+}
+
 export const mockMarketDataProvider: MarketDataProvider = {
   async fetchStocks(query: MarketDataQuery = {}): Promise<MarketStock[]> {
+    if (query.tickers?.length) {
+      return query.tickers.map((t) => stubStock(t));
+    }
+
     let stocks: MarketStock[] = MOCK_STOCKS.map((s) => ({ ...s, priceSource: MOCK_PRICE_SOURCE }));
 
     if (query.sector) {

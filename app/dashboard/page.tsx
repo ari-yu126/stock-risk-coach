@@ -3,7 +3,8 @@ import { MarketRecommendations } from '@/features/market-news/components/MarketR
 import { NewsSection } from '@/features/market-news/components/NewsSection';
 import { ThemeSection } from '@/features/market-news/components/ThemeSection';
 import { GlobalSignalsSection } from '@/features/global-signals/components/GlobalSignalsSection';
-import { PaperTradingDashboard } from '@/features/paper-trading/components/PaperTradingDashboard';
+import { CommunitySentimentSection } from '@/features/community-sentiment/components/CommunitySentimentSection';
+import { BacktestDashboard } from '@/features/paper-trading/components/BacktestDashboard';
 
 export const metadata = {
   title: '단타코치 — 대시보드',
@@ -25,11 +26,14 @@ export default function DashboardPage() {
 
       <main className="mx-auto max-w-6xl space-y-10 px-4 py-8">
         <MarketRecommendations />
+        <section>
+          <CommunitySentimentSection />
+        </section>
         <GlobalSignalsSection />
         <ThemeSection />
         <NewsSection />
         <WatchlistDashboard />
-        <PaperTradingDashboard />
+        <BacktestDashboard />
       </main>
     </div>
   );

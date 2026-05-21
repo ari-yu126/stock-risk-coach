@@ -1,7 +1,9 @@
 'use client';
 
 import { useState, useEffect, useMemo } from 'react';
-import { MOCK_BRIEFING } from '../lib/mock-news';
+import { getTodayBriefing } from '../lib/mock-news';
+import { buildBriefingFromNews } from '../lib/briefingFromNews';
+import type { NewsResponse } from '../lib/providers/types';
 import { RiskBadge } from '../../watchlist/components/RiskBadge';
 import { Sparkline } from '../../watchlist/components/Sparkline';
 import { getIntradaySeries } from '../../watchlist/lib/intradayData';
@@ -13,8 +15,6 @@ import { generateCandidateNarrative } from '../lib/candidateDiscovery';
 import type { MarketDataProviderType } from '@/features/market-data/lib/providers/types';
 import type { DetectedTheme } from '../lib/themeDetection';
 import { calcFreshness, calcAgeMinutes } from '../lib/themeDetection';
-import { analyzeMarketMood, type MarketMoodType } from '../lib/marketMood';
-import { getMarketSession, type SessionInfo } from '../lib/marketSession';
 import { getNotificationSettings, sendWatchlistNotification } from '../../watchlist/lib/notifications';
 import { loadTickers } from '../../watchlist/lib/storage';
 import { enrichWithFlowScores, type FlowEnrichmentContext } from '../lib/candidateDiscovery';
@@ -38,30 +38,6 @@ function freshnessOpacity(iso: string): string {
   if (score >= 0.5)  return 'opacity-75';
   return 'opacity-50';
 }
-
-// ── Market mood style map ─────────────────────────────────────────────────────
-
-const MOOD_STYLE: Record<MarketMoodType, { bg: string; border: string; text: string; icon: string }> = {
-  'risk-on':              { bg: 'bg-emerald-50', border: 'border-emerald-200', text: 'text-emerald-700', icon: '🚀' },
-  'risk-off':             { bg: 'bg-blue-50',    border: 'border-blue-200',    text: 'text-blue-700',    icon: '🛡️' },
-  'mixed':                { bg: 'bg-gray-50',    border: 'border-gray-200',    text: 'text-gray-600',    icon: '⚖️' },
-  'momentum-speculative': { bg: 'bg-orange-50',  border: 'border-orange-200',  text: 'text-orange-700',  icon: '⚡' },
-};
-
-const MOOD_LABEL: Record<MarketMoodType, string> = {
-  'risk-on':              '위험선호',
-  'risk-off':             '위험회피',
-  'mixed':                '중립/혼조',
-  'momentum-speculative': '과열/투기',
-};
-
-// ── Session style ─────────────────────────────────────────────────────────────
-
-const SESSION_STYLE: Record<string, string> = {
-  premarket:     'bg-amber-50 border-amber-200 text-amber-700',
-  intraday:      'bg-blue-50 border-blue-200 text-blue-700',
-  'after-market': 'bg-indigo-50 border-indigo-200 text-indigo-700',
-};
 
 // ── Type aliases & constants ───────────────────────────────────────────────────
 
@@ -146,15 +122,6 @@ function sortCandidates(list: StockCandidate[], key: SortKey): StockCandidate[] 
   });
 }
 
-function deriveMood(candidates: StockCandidate[]): { label: string; cls: string } {
-  if (candidates.length === 0) return { label: '중립', cls: 'text-gray-500' };
-  const rising = candidates.filter((c) => c.stock.changePercent > 0).length;
-  const ratio = rising / candidates.length;
-  if (ratio >= 0.6) return { label: '상승 우세', cls: 'text-red-600' };  // Korean convention: red = up
-  if (ratio <= 0.4) return { label: '하락 우세', cls: 'text-blue-600' };
-  return { label: '혼조', cls: 'text-gray-500' };
-}
-
 // ── Provider badges ────────────────────────────────────────────────────────────
 
 function ProviderBadges({
@@ -203,58 +170,79 @@ function ProviderBadges({
   );
 }
 
-// ── Summary bar ────────────────────────────────────────────────────────────────
+// ── Today focus digest (news issue vs candidate pool — no overlapping labels) ───
 
-function SummaryBar({
-  topTheme, displayCount, totalCount, mood,
+function TodayFocusDigest({
+  topTheme,
+  candidates,
+  displayCount,
+  totalCount,
 }: {
   topTheme: DetectedTheme | null;
+  candidates: StockCandidate[];
   displayCount: number;
   totalCount: number;
-  mood: { label: string; cls: string };
 }) {
-  const separator = (
-    <span
-      className="inline-flex h-4 shrink-0 items-center self-center text-gray-300 leading-none"
-      aria-hidden="true"
-    >
-      |
-    </span>
-  );
+  const rising = candidates.filter((c) => c.stock.changePercent > 0).length;
+  const falling = candidates.filter((c) => c.stock.changePercent < 0).length;
+  const avgChg =
+    candidates.length > 0
+      ? candidates.reduce((s, c) => s + c.stock.changePercent, 0) / candidates.length
+      : 0;
+  const chgSign = avgChg >= 0 ? '+' : '';
 
   return (
-    // top-16 = 64px, sits just under the site header (≈73px) — adjust if needed
-    <div className="mb-4 overflow-hidden border-y border-gray-100 bg-white/95 px-4 py-2.5 shadow-sm backdrop-blur-sm">
-      <div className="flex w-full min-w-0 flex-wrap items-center gap-x-3 gap-y-2 text-sm">
-        {topTheme && (
-          <span className="flex min-w-0 w-full max-w-full items-center gap-1.5 overflow-hidden sm:w-auto sm:max-w-[min(100%,20rem)]">
-            <span
-              className="inline-flex shrink-0 items-center justify-center text-base leading-none"
-              aria-hidden="true"
-            >
-              🔥
-            </span>
-            <span className="min-w-0 flex-1 truncate font-medium leading-5 text-gray-800">
-              <span className="font-normal text-gray-500">감지 테마:</span>{' '}
-              {topTheme.name}
-            </span>
-            <span className="inline-flex h-5 shrink-0 items-center rounded-full bg-blue-100 px-2 text-[11px] font-semibold leading-none text-blue-700">
-              강도 {topTheme.strengthScore}
-            </span>
-          </span>
-        )}
-        {topTheme && separator}
-        <span className="inline-flex shrink-0 items-center leading-5 text-gray-600">
-          후보 <span className="font-semibold text-gray-900">{displayCount}</span>
-          {displayCount !== totalCount && (
-            <span className="text-gray-400"> / {totalCount}</span>
+    <div className="mb-4 rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
+      <p className="mb-3 text-xs text-gray-500">
+        뉴스 이슈와 선정된 종목은 <span className="font-medium text-gray-700">서로 다른 지표</span>예요.
+      </p>
+      <div className="grid gap-3 sm:grid-cols-2">
+        <div className="rounded-lg border border-blue-100 bg-blue-50/40 p-3">
+          <p className="text-[11px] font-semibold uppercase tracking-wide text-blue-600">
+            ① 오늘 뉴스 핵심 이슈
+          </p>
+          {topTheme ? (
+            <>
+              <p className="mt-2 text-base font-semibold text-gray-900">{topTheme.name}</p>
+              <p className="mt-1 text-xs text-gray-600">
+                뉴스 강도 <span className="font-semibold tabular-nums">{topTheme.strengthScore}</span>
+                {' · '}관련 기사 <span className="font-semibold tabular-nums">{topTheme.newsCount}</span>건
+              </p>
+              <p className="mt-2 line-clamp-2 text-xs leading-relaxed text-gray-500">
+                {topTheme.representativeHeadline}
+              </p>
+            </>
+          ) : (
+            <p className="mt-2 text-sm text-gray-500">뚜렷한 뉴스 테마가 없어요.</p>
           )}
-          종목
-        </span>
-        {separator}
-        <span className={`inline-flex shrink-0 items-center font-medium leading-5 ${mood.cls}`}>
-          {mood.label}
-        </span>
+        </div>
+
+        <div className="rounded-lg border border-gray-200 bg-gray-50 p-3">
+          <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-600">
+            ② 자동 선정 후보 종목
+          </p>
+          <p className="mt-2 text-base font-semibold text-gray-900">
+            총 <span className="tabular-nums">{totalCount}</span>종목
+            {displayCount !== totalCount && (
+              <span className="ml-1 text-sm font-normal text-gray-500">
+                (필터 후 <span className="tabular-nums">{displayCount}</span>종목 표시)
+              </span>
+            )}
+          </p>
+          <p className="mt-1 text-xs text-gray-600">
+            오늘 등락 —{' '}
+            <span className="font-semibold text-red-600 tabular-nums">상승 {rising}</span>
+            {' · '}
+            <span className="font-semibold text-blue-600 tabular-nums">하락 {falling}</span>
+            {' · '}
+            평균 <span className={`font-semibold tabular-nums ${avgChg >= 0 ? 'text-red-600' : 'text-blue-600'}`}>
+              {chgSign}{avgChg.toFixed(1)}%
+            </span>
+          </p>
+          <p className="mt-2 text-xs text-gray-500">
+            뉴스·거래량·가격 신호로 골라낸 종목이며, 위 뉴스 이슈와 1:1로 같지는 않아요.
+          </p>
+        </div>
       </div>
     </div>
   );
@@ -651,46 +639,6 @@ function CandidateCard({ candidate }: { candidate: StockCandidate }) {
   );
 }
 
-// ── Market mood card ──────────────────────────────────────────────────────────
-
-function MarketMoodCard({ candidates }: { candidates: StockCandidate[] }) {
-  const mood = useMemo(() => analyzeMarketMood(candidates), [candidates]);
-  const style = MOOD_STYLE[mood.mood];
-  return (
-    <div className={`flex items-start gap-3 rounded-xl border px-4 py-3.5 ${style.bg} ${style.border}`}>
-      <span
-        className="inline-flex shrink-0 items-center self-center text-xl leading-none"
-        aria-hidden="true"
-      >
-        {style.icon}
-      </span>
-      <div className="flex min-w-0 flex-1 flex-col gap-2">
-        <p className={`text-xs font-semibold uppercase tracking-wide leading-snug ${style.text}`}>
-          {MOOD_LABEL[mood.mood]}
-          <span className="ml-2 font-normal normal-case opacity-70">
-            확신도 {Math.round(mood.confidence * 100)}%
-          </span>
-        </p>
-        <p className={`text-sm leading-relaxed ${style.text}`}>{mood.summary}</p>
-      </div>
-    </div>
-  );
-}
-
-// ── Session banner ────────────────────────────────────────────────────────────
-
-function SessionBanner({ session }: { session: SessionInfo }) {
-  const cls = SESSION_STYLE[session.session] ?? SESSION_STYLE['mixed'];
-  return (
-    <div className={`flex items-center gap-2 rounded-lg border px-3 py-2 text-sm ${cls}`}>
-      <span aria-hidden="true">{session.icon}</span>
-      <span className="font-semibold">{session.label}</span>
-      <span className="text-gray-500">—</span>
-      <span>{session.focusMessage}</span>
-    </div>
-  );
-}
-
 // ── Skeleton card ──────────────────────────────────────────────────────────────
 
 function SkeletonCard() {
@@ -846,8 +794,6 @@ export function MarketRecommendations() {
   const [fetchedAt, setFetchedAt] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState(false);
-  const [session, setSession] = useState<SessionInfo | null>(null);
-
   // Controls
   const [sortBy, setSortBy] = useState<SortKey>('score');
   const [showFilters, setShowFilters] = useState(false);
@@ -859,14 +805,30 @@ export function MarketRecommendations() {
   const [flowCtx, setFlowCtx] = useState<FlowEnrichmentContext | null>(null);
   const [sectorRotation, setSectorRotation] = useState<SectorRotationResult | null>(null);
   const [debugMode, setDebugMode] = useState(false);
-
-  // Hydration-safe session + debug detection (client-only, avoids SSR mismatch)
-  useEffect(() => {
-    setSession(getMarketSession()); // eslint-disable-line react-hooks/set-state-in-effect
-  }, []);
+  const [briefing, setBriefing] = useState<MarketBriefing | null>(null);
+  const [briefingLoaded, setBriefingLoaded] = useState(false);
 
   useEffect(() => {
     setDebugMode(new URLSearchParams(window.location.search).get('debug') === '1'); // eslint-disable-line react-hooks/set-state-in-effect
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch('/api/market-news')
+      .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json() as Promise<NewsResponse>; })
+      .then((data) => {
+        if (!cancelled) {
+          setBriefing(buildBriefingFromNews(data.articles));
+          setBriefingLoaded(true);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setBriefing(getTodayBriefing());
+          setBriefingLoaded(true);
+        }
+      });
+    return () => { cancelled = true; };
   }, []);
 
   useEffect(() => {
@@ -948,20 +910,23 @@ export function MarketRecommendations() {
     null,
   ), [candidates]);
 
-  const mood = useMemo(() => deriveMood(candidates), [candidates]);
-
   const hasActiveFilter = filterTheme !== null || filterRisk !== null || filterJudgment !== null;
 
   return (
     <div className="space-y-6">
 
-      {/* Session banner — client-only, no hydration mismatch */}
-      {session && <SessionBanner session={session} />}
-
-      {/* 오늘 시장 브리핑 */}
+      {/* 오늘 시장 브리핑 — same /api/market-news feed as 뉴스 섹션 */}
       <section>
         <h2 className="mb-3 text-lg font-semibold text-gray-900">오늘 시장 브리핑</h2>
-        <BriefingCard briefing={MOCK_BRIEFING} />
+        {!briefingLoaded ? (
+          <div
+            role="status"
+            aria-label="시장 브리핑 로딩 중"
+            className="h-36 animate-pulse rounded-xl border border-gray-100 bg-white"
+          />
+        ) : (
+          <BriefingCard briefing={briefing ?? getTodayBriefing()} />
+        )}
       </section>
 
       {/* 오늘 주목 종목 */}
@@ -970,7 +935,7 @@ export function MarketRecommendations() {
         <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
           <div>
             <h2 className="text-lg font-semibold text-gray-900">오늘 주목 종목</h2>
-            <p className="text-sm text-gray-500">뉴스 테마 · 거래량 · 가격 신호 기반 자동 선정</p>
+            <p className="text-sm text-gray-500">뉴스·거래량·가격 신호로 자동 선정된 종목 목록</p>
           </div>
           {loaded && !error ? (
             <ProviderBadges
@@ -1011,19 +976,14 @@ export function MarketRecommendations() {
         {/* Loaded with candidates */}
         {loaded && !error && candidates.length > 0 && (
           <>
-            {/* Market mood + trader strip */}
-            <div className="space-y-4">
-              <MarketMoodCard candidates={candidates} />
-              <TradingDashboardStrip candidates={candidates} sectorRotation={sectorRotation} />
-            </div>
-
-            {/* Sticky summary bar */}
-            <SummaryBar
+            <TodayFocusDigest
               topTheme={topTheme}
+              candidates={candidates}
               displayCount={sortedFiltered.length}
               totalCount={candidates.length}
-              mood={mood}
             />
+
+            <TradingDashboardStrip candidates={candidates} sectorRotation={sectorRotation} />
 
             {/* Sort + view controls */}
             <div className="mb-3 flex flex-wrap items-center justify-between gap-2">

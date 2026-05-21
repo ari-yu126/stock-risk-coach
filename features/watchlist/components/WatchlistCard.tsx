@@ -1,5 +1,7 @@
 import { WatchlistItem, AttentionLevel, RiskLevel } from '../types';
+import type { EntrySignalResult } from '../lib/entrySignalTypes';
 import { RiskBadge } from './RiskBadge';
+import { CardEntrySignals } from './CardEntrySignals';
 import { detectSurgeSignals, type SurgeLevel } from '../lib/surgeDetection';
 import { getIntradaySeries } from '../lib/intradayData';
 import { Sparkline } from './Sparkline';
@@ -7,6 +9,8 @@ import { Sparkline } from './Sparkline';
 interface WatchlistCardProps {
   item: WatchlistItem;
   onRemove: (ticker: string) => void;
+  entrySignals?: EntrySignalResult[];
+  signalsLoading?: boolean;
 }
 
 const SURGE_BADGE: Record<Exclude<SurgeLevel, 'none'>, { bg: string; text: string; border: string }> = {
@@ -44,7 +48,7 @@ function PriceSourceBadge({ source }: { source: string | undefined }) {
   return <span className="rounded px-1 py-0.5 text-[10px] font-medium bg-amber-50 text-amber-700">샘플</span>;
 }
 
-export function WatchlistCard({ item, onRemove }: WatchlistCardProps) {
+export function WatchlistCard({ item, onRemove, entrySignals = [], signalsLoading }: WatchlistCardProps) {
   const { stock, riskScore } = item;
   const isUp = stock.changePercent >= 0;
   const attn = ATTENTION_STYLES[riskScore.attentionLevel];
@@ -104,6 +108,14 @@ export function WatchlistCard({ item, onRemove }: WatchlistCardProps) {
         </div>
         <Sparkline points={series.points} trend={series.trend} width={80} height={32} />
       </div>
+
+      <div className="mx-5 mt-4 border-t border-gray-100" />
+
+      <div className="pt-3">
+        <CardEntrySignals signals={entrySignals} loading={signalsLoading} />
+      </div>
+
+      <div className="mx-5 border-t border-gray-100" />
 
       {/* ── Risk Level ── */}
       <div className="mt-4 px-5">

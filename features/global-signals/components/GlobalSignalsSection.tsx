@@ -1,7 +1,10 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import { ShowMoreList } from '@/components/ui/ShowMoreList';
 import type { GlobalSignal, GlobalSignalsResponse, SignalImpact } from '../types';
+
+const SIGNAL_INITIAL_COUNT = 3;
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -250,7 +253,7 @@ export function GlobalSignalsSection() {
       <div className="overflow-hidden rounded-xl border border-gray-200 bg-white">
         {!loaded && (
           <div role="status" aria-label="해외 시장 신호 로딩 중">
-            {Array.from({ length: 5 }).map((_, i) => <SkeletonRow key={i} />)}
+            {Array.from({ length: SIGNAL_INITIAL_COUNT }).map((_, i) => <SkeletonRow key={i} />)}
           </div>
         )}
 
@@ -266,9 +269,16 @@ export function GlobalSignalsSection() {
           </p>
         )}
 
-        {loaded && !error && filtered.map((signal) => (
-          <SignalRow key={signal.id} signal={signal} />
-        ))}
+        {loaded && !error && filtered.length > 0 && (
+          <ShowMoreList
+            items={filtered}
+            limit={SIGNAL_INITIAL_COUNT}
+            resetKey={activeFilter}
+            getItemKey={(signal) => signal.id}
+            moreLabel={(n) => `더보기 (${n}건)`}
+            renderItem={(signal) => <SignalRow signal={signal} />}
+          />
+        )}
       </div>
 
       {/* Disclaimer */}

@@ -17,6 +17,7 @@
  *   APPROXIMATED         sector (local map), avgVolume (static baseline — 20-day avg not in quote API)
  */
 
+import { resolveStockName } from '../resolveStockName';
 import type { MarketStock, MarketType } from '../../types';
 import type { MarketDataProvider, MarketDataQuery } from './types';
 
@@ -176,7 +177,7 @@ async function fetchOnePrimary(ticker: string): Promise<MarketStock | null> {
 
   return {
     ticker,
-    name,
+    name: resolveStockName(ticker, name),
     sector: TICKER_SECTOR[ticker] ?? '기타',
     price,
     changePercent,
@@ -245,7 +246,7 @@ async function fetchOnePolling(ticker: string): Promise<MarketStock | null> {
 
   return {
     ticker,
-    name,
+    name: resolveStockName(ticker, name),
     sector: TICKER_SECTOR[ticker] ?? '기타',
     price,
     changePercent,
