@@ -1,10 +1,4 @@
-import { WatchlistDashboard } from '@/features/watchlist/components/WatchlistDashboard';
-import { MarketRecommendations } from '@/features/market-news/components/MarketRecommendations';
-import { NewsSection } from '@/features/market-news/components/NewsSection';
-import { ThemeSection } from '@/features/market-news/components/ThemeSection';
-import { GlobalSignalsSection } from '@/features/global-signals/components/GlobalSignalsSection';
-import { CommunitySentimentSection } from '@/features/community-sentiment/components/CommunitySentimentSection';
-import { BacktestDashboard } from '@/features/paper-trading/components/BacktestDashboard';
+import { DashboardPageContent } from '@/features/dashboard/components/DashboardPageContent';
 
 export const metadata = {
   title: '단타코치 — 대시보드',
@@ -23,17 +17,8 @@ export default function DashboardPage() {
           <p className="mt-0.5 text-xs text-gray-400">이 앱은 리스크 참고용입니다. 매매 추천이 아닙니다.</p>
         </div>
       </header>
-
-      <main className="mx-auto max-w-6xl space-y-10 px-4 py-8">
-        <MarketRecommendations />
-        <section>
-          <CommunitySentimentSection />
-        </section>
-        <GlobalSignalsSection />
-        <ThemeSection />
-        <NewsSection />
-        <WatchlistDashboard />
-        <BacktestDashboard />
+      <main className="mx-auto max-w-6xl px-4 py-6">
+        <DashboardPageContent />
       </main>
     </div>
   );

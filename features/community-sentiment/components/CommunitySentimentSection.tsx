@@ -18,7 +18,27 @@ function fmtTime(iso: string): string {
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 }
 
-export function CommunitySentimentSection() {
+function CollectStatus({ data }: { data: CommunitySentimentResponse }) {
+  return (
+    <div className="flex flex-col items-end gap-1">
+      <span
+        className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-bold ${
+          data.dataKind === 'live'
+            ? 'border-emerald-300 bg-emerald-100 text-emerald-800'
+            : 'border-amber-300 bg-amber-100 text-amber-900'
+        }`}
+      >
+        {data.dataKind === 'live' ? 'LIVE' : 'MOCK'}
+      </span>
+      <span className="text-[11px] text-gray-400">
+        수집 {fmtTime(data.collectedAt)}
+        {data.cacheHit ? ' · 캐시 HIT' : ' · 캐시 MISS'}
+      </span>
+    </div>
+  );
+}
+
+export function CommunitySentimentSection({ embedded = false }: { embedded?: boolean }) {
   const [data, setData] = useState<CommunitySentimentResponse | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState(false);
@@ -70,30 +90,22 @@ export function CommunitySentimentSection() {
 
   return (
     <div className="space-y-3">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <h3 className="text-base font-semibold text-gray-900">커뮤니티 주목 종목</h3>
-          <p className="text-sm text-gray-500">
-            네이버 종목토론방 + 커뮤니티 언급 검색 + 실시간 시세
-          </p>
-        </div>
-        {loaded && !error && data && (
-          <div className="flex flex-col items-end gap-1">
-            <span
-              className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-bold ${
-                data.dataKind === 'live'
-                  ? 'border-emerald-300 bg-emerald-100 text-emerald-800'
-                  : 'border-amber-300 bg-amber-100 text-amber-900'
-              }`}
-            >
-              {data.dataKind === 'live' ? 'LIVE' : 'MOCK'}
-            </span>
-            <span className="text-[11px] text-gray-400">
-              수집 {fmtTime(data.collectedAt)}
-              {data.cacheHit ? ' · 캐시 HIT' : ' · 캐시 MISS'}
-            </span>
+      <div
+        className={`flex flex-wrap items-start justify-between gap-3 ${embedded ? 'mb-4' : ''}`}
+      >
+        {embedded ? (
+          <h2 id="community-sentiment-title" className="text-lg font-bold text-gray-900">
+            커뮤니티 주목 종목
+          </h2>
+        ) : (
+          <div>
+            <h3 className="text-base font-semibold text-gray-900">커뮤니티 주목 종목</h3>
+            <p className="text-sm text-gray-500">
+              네이버 종목토론방 + 커뮤니티 언급 검색 + 실시간 시세
+            </p>
           </div>
         )}
+        {loaded && !error && data && <CollectStatus data={data} />}
       </div>
 
       {loaded && !error && data && <CommunityDataBanner data={data} />}

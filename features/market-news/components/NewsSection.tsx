@@ -123,7 +123,7 @@ function SkeletonItem() {
 
 // ── Main export ───────────────────────────────────────────────────────────────
 
-export function NewsSection() {
+export function NewsSection({ compact = false, maxItems = 5 }: { compact?: boolean; maxItems?: number }) {
   const [activePill, setActivePill] = useState<Pill>(FILTER_ALL);
   const [result, setResult] = useState<FetchResult>({ response: null, error: false, loaded: false });
 
@@ -157,36 +157,26 @@ export function NewsSection() {
             a.matchedKeywords.includes(activePill),
           );
 
-  return (
-    <section>
-      <div className="mb-3 flex items-center justify-between">
-        <div>
-          <h2 className="text-lg font-semibold text-gray-900">섹터별 뉴스</h2>
-          <p className="text-sm text-gray-500">관심 섹터의 최신 뉴스를 확인하세요</p>
-        </div>
-        {loaded && !error && providerType && (
-          <div className="flex flex-col items-end gap-1">
-            <ProviderBadge providerType={providerType} />
-            {response?.fetchedAt && (
-              <span className="text-[11px] text-gray-400">
-                업데이트 {fmtTime(response.fetchedAt)}
-              </span>
-            )}
-          </div>
-        )}
-      </div>
+  const display = articles.slice(0, compact ? maxItems : articles.length);
+  const Wrapper = compact ? 'div' : 'section';
 
-      {/* Filter pills */}
-      <div className="mb-4 flex flex-wrap gap-2">
+  return (
+    <Wrapper>
+      {!compact && (
+        <div className="mb-3 flex items-center justify-between">
+          <h2 className="text-lg font-semibold text-gray-900">섹터별 뉴스</h2>
+          {loaded && providerType && <ProviderBadge providerType={providerType} />}
+        </div>
+      )}
+
+      <div className="mb-3 flex flex-wrap gap-1.5">
         {PILLS.map((pill) => (
           <button
             key={pill}
+            type="button"
             onClick={() => setActivePill(pill)}
-            aria-pressed={activePill === pill}
-            className={`rounded-full border px-3 py-1 text-sm font-medium transition-colors ${
-              activePill === pill
-                ? 'border-blue-500 bg-blue-500 text-white'
-                : 'border-gray-200 bg-white text-gray-600 hover:border-blue-300 hover:text-blue-600'
+            className={`rounded-full border px-2 py-0.5 text-[11px] font-medium text-gray-500 ${
+              activePill === pill ? 'border-blue-500 bg-blue-500 text-white' : 'border-gray-200 bg-white'
             }`}
           >
             {pill}
@@ -194,8 +184,7 @@ export function NewsSection() {
         ))}
       </div>
 
-      {/* Article list */}
-      <div className="rounded-xl border border-gray-200 bg-white px-5">
+      <div className={`rounded-xl border border-gray-200 bg-white ${compact ? 'px-3' : 'px-5'}`}>
         {!loaded && (
           <div role="status" aria-label="뉴스 로딩 중">
             {Array.from({ length: NEWS_INITIAL_COUNT }).map((_, i) => <SkeletonItem key={i} />)}
@@ -214,17 +203,20 @@ export function NewsSection() {
           </p>
         )}
 
-        {loaded && !error && articles.length > 0 && (
-          <ShowMoreList
-            items={articles}
-            limit={NEWS_INITIAL_COUNT}
-            resetKey={activePill}
-            getItemKey={(article, i) => `${article.link || article.title}-${i}`}
-            moreLabel={(n) => `더보기 (${n}건)`}
-            renderItem={(article) => <ArticleItem article={article} />}
-          />
-        )}
+        {loaded && !error && display.length > 0 &&
+          (compact ? (
+            display.map((a, i) => <ArticleItem key={`${a.link}-${i}`} article={a} />)
+          ) : (
+            <ShowMoreList
+              items={articles}
+              limit={NEWS_INITIAL_COUNT}
+              resetKey={activePill}
+              getItemKey={(article, i) => `${article.link || article.title}-${i}`}
+              moreLabel={(n) => `더보기 (${n}건)`}
+              renderItem={(article) => <ArticleItem article={article} />}
+            />
+          ))}
       </div>
-    </section>
+    </Wrapper>
   );
 }

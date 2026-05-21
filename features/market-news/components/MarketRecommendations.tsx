@@ -785,9 +785,21 @@ function DebugPanel({
   );
 }
 
+export type MarketRecSection = 'briefing' | 'focus';
+
 // ── Main export ────────────────────────────────────────────────────────────────
 
-export function MarketRecommendations() {
+export function MarketRecommendations({
+  show = ['briefing', 'focus'],
+  defaultCompact = false,
+  embedded = false,
+}: {
+  show?: MarketRecSection[];
+  defaultCompact?: boolean;
+  embedded?: boolean;
+}) {
+  const showBriefing = show.includes('briefing');
+  const showFocus = show.includes('focus');
   const [candidates, setCandidates] = useState<StockCandidate[]>([]);
   const [newsProviderType, setNewsProviderType] = useState<'naver' | 'mock'>('mock');
   const [marketProviderType, setMarketProviderType] = useState<MarketDataProviderType>('mock');
@@ -800,7 +812,7 @@ export function MarketRecommendations() {
   const [filterTheme, setFilterTheme] = useState<string | null>(null);
   const [filterRisk, setFilterRisk] = useState<RiskLevel | null>(null);
   const [filterJudgment, setFilterJudgment] = useState<JudgmentLabel | null>(null);
-  const [compactMode, setCompactMode] = useState(false);
+  const [compactMode, setCompactMode] = useState(defaultCompact);
 
   const [flowCtx, setFlowCtx] = useState<FlowEnrichmentContext | null>(null);
   const [sectorRotation, setSectorRotation] = useState<SectorRotationResult | null>(null);
@@ -813,6 +825,7 @@ export function MarketRecommendations() {
   }, []);
 
   useEffect(() => {
+    if (!showBriefing) return;
     let cancelled = false;
     fetch('/api/market-news')
       .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json() as Promise<NewsResponse>; })
@@ -829,9 +842,10 @@ export function MarketRecommendations() {
         }
       });
     return () => { cancelled = true; };
-  }, []);
+  }, [showBriefing]);
 
   useEffect(() => {
+    if (!showFocus) return;
     let cancelled = false;
     fetch('/api/candidates')
       .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json() as Promise<CandidatesResponse>; })
@@ -886,7 +900,7 @@ export function MarketRecommendations() {
       })
       .catch(() => { if (!cancelled) { setError(true); setLoaded(true); } });
     return () => { cancelled = true; };
-  }, []);
+  }, [showFocus]);
 
   // ── Derived values ──────────────────────────────────────────────────────────
 
@@ -915,28 +929,26 @@ export function MarketRecommendations() {
   return (
     <div className="space-y-6">
 
-      {/* 오늘 시장 브리핑 — same /api/market-news feed as 뉴스 섹션 */}
-      <section>
-        <h2 className="mb-3 text-lg font-semibold text-gray-900">오늘 시장 브리핑</h2>
-        {!briefingLoaded ? (
-          <div
-            role="status"
-            aria-label="시장 브리핑 로딩 중"
-            className="h-36 animate-pulse rounded-xl border border-gray-100 bg-white"
-          />
-        ) : (
-          <BriefingCard briefing={briefing ?? getTodayBriefing()} />
-        )}
-      </section>
+      {showBriefing && (
+        <div>
+          {!briefingLoaded ? (
+            <div role="status" className="h-32 animate-pulse rounded-xl border bg-white" />
+          ) : (
+            <BriefingCard briefing={briefing ?? getTodayBriefing()} />
+          )}
+        </div>
+      )}
 
-      {/* 오늘 주목 종목 */}
-      <section>
-        {/* Section header */}
-        <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
-          <div>
-            <h2 className="text-lg font-semibold text-gray-900">오늘 주목 종목</h2>
-            <p className="text-sm text-gray-500">뉴스·거래량·가격 신호로 자동 선정된 종목 목록</p>
-          </div>
+      {showFocus && (
+      <div>
+        <div className={`flex flex-wrap items-start justify-between gap-3 ${embedded ? 'mb-4' : 'mb-3'}`}>
+          {embedded ? (
+            <h2 id="today-focus-title" className="text-lg font-bold text-gray-900">
+              오늘 주목 종목
+            </h2>
+          ) : (
+            <div className="sr-only"><h2>오늘 주목 종목</h2></div>
+          )}
           {loaded && !error ? (
             <ProviderBadges
               newsType={newsProviderType}
@@ -1104,7 +1116,8 @@ export function MarketRecommendations() {
             )}
           </>
         )}
-      </section>
+      </div>
+      )}
     </div>
   );
 }

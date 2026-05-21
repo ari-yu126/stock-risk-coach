@@ -1,5 +1,8 @@
+import { useMemo } from 'react';
+import type { CommunityStockItem } from '@/features/community-sentiment/types';
 import { WatchlistItem, AttentionLevel, RiskLevel } from '../types';
 import type { EntrySignalResult } from '../lib/entrySignalTypes';
+import { buildTradingDecision } from '../lib/tradingDecision';
 import { RiskBadge } from './RiskBadge';
 import { CardEntrySignals } from './CardEntrySignals';
 import { detectSurgeSignals, type SurgeLevel } from '../lib/surgeDetection';
@@ -11,7 +14,14 @@ interface WatchlistCardProps {
   onRemove: (ticker: string) => void;
   entrySignals?: EntrySignalResult[];
   signalsLoading?: boolean;
+  community?: CommunityStockItem | null;
 }
+
+const FOMO_STYLE = {
+  LOW: 'bg-emerald-100 text-emerald-800 border-emerald-200',
+  MEDIUM: 'bg-amber-100 text-amber-800 border-amber-200',
+  HIGH: 'bg-red-100 text-red-800 border-red-200',
+} as const;
 
 const SURGE_BADGE: Record<Exclude<SurgeLevel, 'none'>, { bg: string; text: string; border: string }> = {
   medium:   { bg: 'bg-yellow-50',  text: 'text-yellow-700', border: 'border-yellow-300' },
@@ -48,8 +58,18 @@ function PriceSourceBadge({ source }: { source: string | undefined }) {
   return <span className="rounded px-1 py-0.5 text-[10px] font-medium bg-amber-50 text-amber-700">샘플</span>;
 }
 
-export function WatchlistCard({ item, onRemove, entrySignals = [], signalsLoading }: WatchlistCardProps) {
+export function WatchlistCard({
+  item,
+  onRemove,
+  entrySignals = [],
+  signalsLoading,
+  community,
+}: WatchlistCardProps) {
   const { stock, riskScore } = item;
+  const decision = useMemo(
+    () => buildTradingDecision(entrySignals, riskScore, community),
+    [entrySignals, riskScore, community],
+  );
   const isUp = stock.changePercent >= 0;
   const attn = ATTENTION_STYLES[riskScore.attentionLevel];
   const surge = detectSurgeSignals(stock);
@@ -75,6 +95,19 @@ export function WatchlistCard({ item, onRemove, entrySignals = [], signalsLoadin
             <path d="M3 3l10 10M13 3L3 13" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
           </svg>
         </button>
+      </div>
+
+      <div className="mx-5 mt-2 flex flex-wrap items-center gap-2 rounded-lg border border-gray-100 bg-slate-50 px-2.5 py-2">
+        <span className="text-[10px] font-bold text-gray-500">FOMO</span>
+        <span
+          className={`rounded-full border px-2.5 py-0.5 text-[11px] font-bold ${FOMO_STYLE[decision.fomoLevel]}`}
+        >
+          {decision.fomoLevel}
+        </span>
+        <span className="text-[10px] text-gray-500">{decision.actionLabel}</span>
+        <span className="ml-auto text-xs font-bold tabular-nums text-gray-800">
+          Entry {decision.entryScore}
+        </span>
       </div>
 
       {/* ── Surge badges ── */}
