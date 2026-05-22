@@ -160,15 +160,19 @@ async function fetchOnePrimary(ticker: string): Promise<MarketStock | null> {
     return null;
   }
 
-  // accumulatedTradingVolume dropped from primary endpoint as of 2026 Q2; fall back to static avg.
-  const volume = parseNumber(data.accumulatedTradingVolumeRaw ?? data.accumulatedTradingVolume)
-    ?? TICKER_AVG_VOLUME[ticker]
-    ?? 0;
+  // Primary often omits volume — do not substitute avgVolume for today's volume (ratio would always be 0%).
+  const volumeFromApi = parseNumber(
+    data.accumulatedTradingVolumeRaw ?? data.accumulatedTradingVolume,
+  );
+  const volume = volumeFromApi ?? 0;
+  const avgVolume = TICKER_AVG_VOLUME[ticker] ?? volumeFromApi ?? 1;
 
   const rawTradingValue = parseNumber(data.accumulatedTradingValueRaw);
   const tradingValue = rawTradingValue !== null && rawTradingValue > 0
     ? Math.round(rawTradingValue / 100_000_000)
-    : Math.round((price * volume) / 100_000_000);
+    : volume > 0
+      ? Math.round((price * volume) / 100_000_000)
+      : 0;
 
   const rawMarketValue = parseNumber(data.marketValueFullRaw);
   const marketCapBillion = rawMarketValue !== null && rawMarketValue > 0
@@ -182,7 +186,7 @@ async function fetchOnePrimary(ticker: string): Promise<MarketStock | null> {
     price,
     changePercent,
     volume,
-    avgVolume: TICKER_AVG_VOLUME[ticker] ?? volume,
+    avgVolume,
     marketCapBillion,
     tradingValue,
     marketType: resolveMarketType(data.stockExchangeType?.code, ticker),
@@ -230,14 +234,18 @@ async function fetchOnePolling(ticker: string): Promise<MarketStock | null> {
     return null;
   }
 
-  const volume = parseNumber(data.accumulatedTradingVolumeRaw ?? data.accumulatedTradingVolume)
-    ?? TICKER_AVG_VOLUME[ticker]
-    ?? 0;
+  const volumeFromApi = parseNumber(
+    data.accumulatedTradingVolumeRaw ?? data.accumulatedTradingVolume,
+  );
+  const volume = volumeFromApi ?? 0;
+  const avgVolume = TICKER_AVG_VOLUME[ticker] ?? volumeFromApi ?? 1;
 
   const rawTradingValue = parseNumber(data.accumulatedTradingValueRaw);
   const tradingValue = rawTradingValue !== null && rawTradingValue > 0
     ? Math.round(rawTradingValue / 100_000_000)
-    : Math.round((price * volume) / 100_000_000);
+    : volume > 0
+      ? Math.round((price * volume) / 100_000_000)
+      : 0;
 
   const rawMarketValue = parseNumber(data.marketValueFullRaw);
   const marketCapBillion = rawMarketValue !== null && rawMarketValue > 0
@@ -251,7 +259,7 @@ async function fetchOnePolling(ticker: string): Promise<MarketStock | null> {
     price,
     changePercent,
     volume,
-    avgVolume: TICKER_AVG_VOLUME[ticker] ?? volume,
+    avgVolume,
     marketCapBillion,
     tradingValue,
     marketType: resolveMarketType(data.stockExchangeType?.code, ticker),
@@ -261,12 +269,39 @@ async function fetchOnePolling(ticker: string): Promise<MarketStock | null> {
 
 // ── Per-ticker fetch with polling fallback ────────────────────────────────────
 
+function mergeVolumeFromPolling(primary: MarketStock, polling: MarketStock): MarketStock {
+  const avgVolume = TICKER_AVG_VOLUME[primary.ticker] ?? polling.avgVolume;
+  const tradingValue =
+    polling.tradingValue > 0
+      ? polling.tradingValue
+      : polling.volume > 0
+        ? Math.round((primary.price * polling.volume) / 100_000_000)
+        : primary.tradingValue;
+
+  return {
+    ...primary,
+    volume: polling.volume,
+    avgVolume,
+    tradingValue,
+  };
+}
+
 async function fetchOne(ticker: string): Promise<MarketStock | null> {
   const primary = await fetchOnePrimary(ticker);
-  if (primary) return primary;
 
-  console.log(`[naver-finance] ${ticker} → primary failed, trying polling endpoint`);
-  return fetchOnePolling(ticker);
+  if (!primary) {
+    console.log(`[naver-finance] ${ticker} → primary failed, trying polling endpoint`);
+    return fetchOnePolling(ticker);
+  }
+
+  // Primary quote often lacks accumulated volume — enrich from polling so volume ratio is meaningful.
+  if (primary.volume > 0) return primary;
+
+  const polling = await fetchOnePolling(ticker);
+  if (!polling?.volume) return primary;
+
+  console.log(`[naver-finance] ${ticker} → merged polling volume into primary quote`);
+  return mergeVolumeFromPolling(primary, polling);
 }
 
 // ── Health probe (exported for /api/provider-health) ──────────────────────────

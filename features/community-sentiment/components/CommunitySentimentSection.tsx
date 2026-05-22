@@ -11,7 +11,7 @@ import { CommunitySourceStatusBar } from './CommunitySourceStatusBar';
 const IS_DEV = process.env.NODE_ENV === 'development';
 
 type RiskFilter = 'ALL' | CommunityRiskLevel;
-type SortKey = 'score' | 'mention' | 'sentiment';
+type SortKey = 'score' | 'mention' | 'sentiment' | 'volume';
 
 function fmtTime(iso: string): string {
   const d = new Date(iso);
@@ -81,6 +81,8 @@ export function CommunitySentimentSection({ embedded = false }: { embedded?: boo
           return b.mentionGrowthPercent - a.mentionGrowthPercent;
         case 'sentiment':
           return b.sentimentScore - a.sentimentScore;
+        case 'volume':
+          return b.volumeGrowthPercent - a.volumeGrowthPercent;
         default:
           return b.communityScore - a.communityScore;
       }
@@ -140,6 +142,7 @@ export function CommunitySentimentSection({ embedded = false }: { embedded?: boo
               { key: 'score' as const, label: '점수순' },
               { key: 'mention' as const, label: '언급↑' },
               { key: 'sentiment' as const, label: '긍정↑' },
+              { key: 'volume' as const, label: '거래량↑' },
             ] as const
           ).map(({ key, label }) => (
             <button
@@ -191,7 +194,16 @@ export function CommunitySentimentSection({ embedded = false }: { embedded?: boo
 
       {loaded && !error && filtered.length === 0 && (
         <p className="rounded-xl border border-dashed border-gray-200 py-8 text-center text-sm text-gray-400">
-          필터 조건에 맞는 종목이 없어요.
+          {fomoOnly ? (
+            <>
+              <span className="font-medium text-gray-600">FOMO HIGH</span> 조건을 만족하는 종목이 없어요.
+              <span className="mt-1 block text-xs">
+                언급 급증(최근 12h 대비 2.2배↑) · 거래량 3배↑ · 커뮤니티 긍정 감성 55점 이상
+              </span>
+            </>
+          ) : (
+            '필터 조건에 맞는 종목이 없어요.'
+          )}
         </p>
       )}
 

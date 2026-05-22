@@ -19,9 +19,10 @@ import type {
 const STOCKS = [
   { ticker: '005930', name: '삼성전자', sector: '반도체', baseVol: 1.1, priceChg: 0.8 },
   { ticker: '000660', name: 'SK하이닉스', sector: '반도체', baseVol: 2.4, priceChg: 2.1 },
-  { ticker: '042700', name: '한미반도체', sector: '반도체', baseVol: 3.2, priceChg: 5.8 },
-  { ticker: '086520', name: '에코프로', sector: '2차전지', baseVol: 5.5, priceChg: 7.3 },
-  { ticker: '247540', name: '에코프로비엠', sector: '2차전지', baseVol: 3.1, priceChg: 6.1 },
+  /** Demo FOMO HIGH: mention spike + volume ≥3× + sentiment ≥55 */
+  { ticker: '042700', name: '한미반도체', sector: '반도체', baseVol: 3.2, priceChg: 5.8, demoFomo: true },
+  { ticker: '086520', name: '에코프로', sector: '2차전지', baseVol: 5.5, priceChg: 7.3, demoFomo: true },
+  { ticker: '247540', name: '에코프로비엠', sector: '2차전지', baseVol: 3.1, priceChg: 6.1, demoFomo: true },
   { ticker: '277810', name: '레인보우로보틱스', sector: '로봇', baseVol: 2.8, priceChg: 4.2 },
   { ticker: '035420', name: 'NAVER', sector: '플랫폼', baseVol: 0.9, priceChg: -1.2 },
   { ticker: '068270', name: '셀트리온', sector: '바이오', baseVol: 1.4, priceChg: 1.5 },
@@ -31,7 +32,7 @@ const MOCK_TITLES: Record<string, string[]> = {
   '005930': ['AI 데이터센터 수혜 기대', '실적 시즌 돌파 기대감', '반도체 강세 지속?'],
   '000660': ['HBM 수요 폭발', '엔비디아 수혜 재평가', '고점 우려 vs 매집'],
   '042700': ['급등 후 설거지?', '테마주 떡상', '손절 vs 홀딩'],
-  '086520': ['2차전지 악재 우려', '거래량 폭등', '개미털기 느낌'],
+  '086520': ['2차전지 강세 수혜', '거래량 폭등', '급등 후 매집'],
   '247540': ['실적 기대', '수주 뉴스', '변동성 과열'],
   '277810': ['로봇 AI 테마', '정부 정책 수혜', '강세 지속'],
   '035420': ['플랫폼 규제 우려', '반등 시도', '중립 흐름'],
@@ -115,12 +116,15 @@ export function collectMockCommunitySentiment(): CommunitySentimentResponse {
     const bySource = groupBySource(posts);
     const mentionCount = posts.length;
     const rand = seededRand(parseInt(stock.ticker, 10));
-    const avg7d = 8 + Math.floor(rand() * 6);
-    const mentionGrowth = mentionCount / avg7d;
+    const demoFomo = 'demoFomo' in stock && stock.demoFomo;
+    const avg7d = demoFomo ? 4 + Math.floor(rand() * 2) : 8 + Math.floor(rand() * 6);
+    let mentionGrowth = mentionCount / avg7d;
+    if (demoFomo) mentionGrowth = Math.max(mentionGrowth, 2.3 + rand() * 0.4);
     const volumeGrowth = stock.baseVol;
     const allTrend = posts.flatMap((p) => p.trendHits);
     const trendKeywordScore = calcTrendKeywordScore(allTrend);
-    const sentimentScore = calcWeightedSentimentScore(posts, bySource);
+    let sentimentScore = calcWeightedSentimentScore(posts, bySource);
+    if (demoFomo && sentimentScore < 55) sentimentScore = 58 + Math.floor(rand() * 12);
 
     const {
       positiveRatio,
